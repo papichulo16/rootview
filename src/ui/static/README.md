@@ -49,22 +49,6 @@ from any subdirectory on the published site.
 A document with an empty url renders as inert grey text marked "not published
 yet" rather than a dead link.
 
-## Publishing to GitHub Pages
-
-Once this is in a repository:
-
-**Option A - publish this folder from a branch.** GitHub Pages can serve from
-`/docs` on a branch, so rename this folder to `docs/` at the repository root and
-choose Settings -> Pages -> Deploy from a branch -> `main` / `/docs`. If you
-rename it, update `OUTPUT_DIR` in `../web/tools/build_static_site.py` to match.
-
-**Option B - publish with an Action.** Keep the folder named `site/` and add a
-workflow that uploads it as the Pages artifact. This is the better option if you
-want the page rebuilt automatically on every push rather than committing
-generated files.
-
-Either way the result is a permanent URL that works when your laptop is off.
-
 ## What is in here
 
 ```
