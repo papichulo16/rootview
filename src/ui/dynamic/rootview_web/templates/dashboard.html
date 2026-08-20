@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}RootView - Dashboard{% endblock %}
+
+{% block content %}
+{# The banner is the whole point of this page: a non-expert should be able to
+   read one line and know whether to worry.
+
+   Four states, and the difference between them is the difference between
+   information and a false sense of safety. "clear" is only ever shown once a
+   scan has actually completed; until then the banner says so plainly. #}
+<section class="verdict" id="verdict" data-state="{{ verdict }}">
+  <div class="verdict-icon" aria-hidden="true"></div>
+  <div class="verdict-text">
+    <h1 id="verdict-title">
+      {% if verdict == 'alert' %}
+        {{ detections | length }} finding{{ '' if detections | length == 1 else 's' }} need attention
+      {% elif verdict == 'unconfigured' %}
+        No introspection backend connected
+      {% elif verdict == 'pending' %}
+        Waiting for the first scan
+      {% else %}
+        No suspicious eBPF activity detected
+      {% endif %}
+    </h1>
+    <p id="verdict-sub">
+      {% if verdict == 'alert' %}
+        RootView found eBPF activity in a guest that does not look legitimate.
+      {% elif verdict == 'unconfigured' %}
+        RootView is not reading any guest, so it cannot tell you whether this system is clean.
+      {% elif verdict == 'pending' %}
+        No guest has been examined yet. This banner will update as soon as a scan completes.
+      {% else %}
+        RootView is watching {{ vms | selectattr('state.value', 'equalto', 'running') | list | length }}
+        running guest(s) from the hypervisor.
+      {% endif %}
+    </p>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Guests under introspection</h2>
+  <div class="vm-grid">
+    {% for vm in vms %}
+    <article class="vm-card" data-vm="{{ vm.vm_id }}">
+      <header>
+        <h3>{{ vm.name }}</h3>
+        <span class="pill state-{{ vm.state.value }}">{{ vm.state.value.replace('_', ' ') }}</span>
+      </header>
+      <dl>
+        <div><dt>Kernel</dt><dd>{{ vm.guest.kernel_release or '-' | safe }}</dd></div>
+        <div><dt>Arch</dt><dd>{{ vm.guest.architecture or '-' | safe }}</dd></div>
+        <div>
+          <dt>Profile</dt>
+          <dd>
+            {% if vm.guest.profile_loaded %}
+              loaded
+            {% else %}
+              {# Without a matching kernel profile the backend cannot resolve
+                 symbols, so findings for this guest would be unreliable. #}
+              <span class="warn">missing</span>
+            {% endif %}
+          </dd>
+        </div>
+      </dl>
+      <footer>
+        <span class="counts">
+          <span data-role="progs">-</span> programs /
+          <span data-role="maps">-</span> maps
+        </span>
+        <a href="/introspect?vm={{ vm.vm_id }}">Inspect &rarr;</a>
+      </footer>
+    </article>
+    {% else %}
+    <p class="empty">
+      No guests are available for introspection.
+      {% if verdict == 'unconfigured' %}
+        Connect an introspection backend to begin reading guest kernel memory.
+      {% endif %}
+    </p>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Findings <span class="muted" id="finding-count">({{ detections | length }})</span></h2>
+  <div id="findings" class="findings">
+    {% for d in detections %}
+    <article class="finding sev-{{ d.severity.value }}" data-id="{{ d.detection_id }}">
+      <div class="finding-head">
+        <span class="sev-badge">{{ d.severity.value }}</span>
+        <h3>{{ d.title }}</h3>
+        <time>{{ d.timestamp.strftime('%H:%M:%S') }}</time>
+      </div>
+      <p>{{ d.description }}</p>
+      {% if d.recommendation %}
+      <p class="reco"><strong>What to do:</strong> {{ d.recommendation }}</p>
+      {% endif %}
+      <details>
+        <summary>Evidence</summary>
+        <table class="evidence">
+          {% for key, value in d.evidence.items() %}
+          <tr><th>{{ key }}</th><td>{{ value if value is not none else '-' | safe }}</td></tr>
+          {% endfor %}
+        </table>
+      </details>
+    </article>
+    {% endfor %}
+  </div>
+  <p class="empty" id="findings-empty" {{ 'hidden' if detections }}>
+    {% if verdict == 'unconfigured' %}
+      Nothing is being scanned, so there is nothing to report.
+    {% else %}
+      Nothing to report yet. New findings appear here as they are detected.
+    {% endif %}
+  </p>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>RootView.initDashboard();</script>
+{% endblock %}

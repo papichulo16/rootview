@@ -1,0 +1,242 @@
+/* Landing page styles.
+   Loaded only on "/", on top of app.css, which supplies the palette, the page
+   chrome and .btn. */
+
+/* ---------- course project header ---------- */
+
+.project-header {
+  padding: 26px 0 30px;
+  border-bottom: 1px solid var(--border);
+}
+
+.pinfo { margin: 0 0 26px; display: grid; gap: 12px; }
+
+/* Label / value pairs. The label column is fixed so the three rows line up,
+   and collapses to stacked rows on narrow screens. */
+.pinfo > div {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.pinfo dt {
+  color: var(--text-muted);
+  font-size: 13.5px;
+  padding-top: 1px;
+}
+.pinfo dd { margin: 0; font-size: 14.5px; }
+
+.people { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.people li { font-size: 14px; }
+
+.semester-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.deliverables { width: 100%; border-collapse: collapse; }
+
+.deliverables th {
+  text-align: left;
+  font-weight: 500;
+  font-size: 14.5px;
+  padding: 8px 16px 8px 0;
+  white-space: nowrap;
+  vertical-align: top;
+  width: 260px;
+}
+.deliverables th .due { color: var(--text-muted); font-weight: 400; }
+.deliverables td { padding: 8px 0; font-size: 14.5px; }
+.deliverables tr + tr th,
+.deliverables tr + tr td { border-top: 1px solid var(--border); }
+
+.doc { white-space: nowrap; }
+
+/* A deliverable with no url yet. Deliberately not a link: a dead hyperlink
+   invites a click that goes nowhere. */
+.doc-pending {
+  color: var(--text-muted);
+  opacity: 0.65;
+  border-bottom: 1px dotted var(--border);
+  cursor: default;
+}
+
+/* ---------- hero ---------- */
+
+.hero {
+  padding: 54px 0 46px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+.eyebrow {
+  margin: 0 0 18px;
+  font-size: 12px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.hero h1 {
+  margin: 0 0 20px;
+  font-size: clamp(28px, 4.4vw, 46px);
+  line-height: 1.16;
+  letter-spacing: -0.6px;
+  font-weight: 680;
+  max-width: 22ch;
+}
+
+/* The second line is the claim the whole project rests on, so it gets the
+   accent rather than the problem statement above it. */
+.hero h1 .hl { color: var(--accent); }
+
+.lede {
+  margin: 0 0 30px;
+  max-width: 62ch;
+  font-size: clamp(16px, 1.6vw, 18px);
+  line-height: 1.62;
+  color: var(--text-muted);
+}
+
+.cta-row { display: flex; flex-wrap: wrap; gap: 11px; margin-bottom: 24px; }
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #08121f;
+  font-weight: 600;
+  padding: 10px 20px;
+}
+.btn.primary:hover { filter: brightness(1.12); color: #08121f; }
+.cta-row .btn { padding: 10px 18px; text-decoration: none; }
+.cta-row .btn:hover { text-decoration: none; }
+
+.hero-status { margin: 0; font-size: 13px; color: var(--text-muted); }
+
+/* ---------- section scaffolding ---------- */
+
+.section { padding: 42px 0; border-bottom: 1px solid var(--border); }
+.section:last-of-type { border-bottom: none; }
+
+.section-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+/* ---------- algorithms and tools ---------- */
+
+.tool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+/* One-pixel grid gaps over a border-coloured background draw the dividing
+   lines, so the cells read as a single table rather than floating chips. */
+.tool {
+  background: var(--bg-raised);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.tool strong { font-size: 14.5px; font-weight: 600; }
+.tool span { font-size: 13px; color: var(--text-muted); }
+
+/* ---------- technical challenges ---------- */
+
+.challenge-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.challenge {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--medium);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+}
+.challenge h3 { margin: 0 0 9px; font-size: 15.5px; }
+.challenge p { margin: 0; font-size: 14px; line-height: 1.6; color: var(--text-muted); }
+
+/* ---------- milestones ---------- */
+
+.milestones {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.milestone {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px 20px;
+}
+
+.milestone header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.milestone h3 { margin: 0; font-size: 15.5px; }
+.milestone .due {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.milestone-summary { margin: 0 0 12px; font-size: 13.5px; line-height: 1.55; color: var(--text-muted); }
+
+.tasks { margin: 0; padding: 0; list-style: none; display: grid; gap: 7px; }
+.tasks li {
+  font-size: 13.5px;
+  line-height: 1.45;
+  padding-left: 16px;
+  position: relative;
+}
+.tasks li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  border: 1px solid var(--text-muted);
+}
+
+/* ---------- narrow screens ---------- */
+
+@media (max-width: 760px) {
+  .hero { padding: 34px 0 32px; }
+  .cta-row .btn { flex: 1 1 auto; text-align: center; }
+
+  /* Stack the label above its value rather than squeezing two columns. */
+  .pinfo > div { grid-template-columns: 1fr; gap: 3px; }
+  .deliverables th,
+  .deliverables td { display: block; width: auto; white-space: normal; }
+  .deliverables th { padding-bottom: 2px; }
+  .deliverables tr + tr td { border-top: none; }
+}

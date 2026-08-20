@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RootView: hypervisor-based eBPF rootkit detection</title>
+  <link rel="stylesheet" href="static/css/app.css">
+  
+<link rel="stylesheet" href="static/css/landing.css">
+
+</head>
+<body>
+  <header class="topbar">
+    
+    <a class="brand" href="./">
+      <span class="brand-mark">▣</span>
+      <span class="brand-name">RootView</span>
+    </a>
+    
+    
+    
+  </header>
+
+  <main class="page">
+    
+
+
+<section class="project-header">
+  <dl class="pinfo">
+    <div>
+      <dt>Project Name</dt>
+      <dd>RootView - a KVM-based eBPF malware detection engine</dd>
+    </div>
+    <div>
+      <dt>Team Members and Email Addresses</dt>
+      <dd>
+        <ul class="people">
+          
+          <li>Luis Abraham &middot; <a href="mailto:labrahamesco2024@my.fit.edu">labrahamesco2024@my.fit.edu</a></li>
+          
+          <li>Dylin Irons &middot; <a href="mailto:dirons2024@my.fit.edu">dirons2024@my.fit.edu</a></li>
+          
+          <li>Dominick Morales &middot; <a href="mailto:dmorales2024@my.fit.edu">dmorales2024@my.fit.edu</a></li>
+          
+          <li>Braiden Ames &middot; <a href="mailto:bames2024@my.fit.edu">bames2024@my.fit.edu</a></li>
+          
+        </ul>
+      </dd>
+    </div>
+    <div>
+      <dt>Faculty Advisor</dt>
+      <dd>Dr. Eraldo Ribeiro &middot; <a href="mailto:eribeiro@fit.edu">eribeiro@fit.edu</a></dd>
+    </div>
+  </dl>
+
+  
+  <h2 class="semester-title">First Semester</h2>
+  <table class="deliverables">
+    <tbody>
+      
+      <tr>
+        <th scope="row">Plan <span class="due">(Aug 31)</span></th>
+        <td>
+          
+            
+              <a class="doc" href="https://docs.google.com/document/d/1X2HVOF_cRx9IzFaK1CwSO_rhBEuO-SpnqIVeKuTrdmY/edit?usp=sharing">Plan</a>, 
+          
+            
+              
+              <span class="doc doc-pending" title="Not published yet">Presentation</span>
+          
+        </td>
+      </tr>
+      
+      <tr>
+        <th scope="row">Milestone 1 <span class="due">(Sep 28)</span></th>
+        <td>
+          
+            
+              
+              <span class="doc doc-pending" title="Not published yet">Requirement</span>, 
+          
+            
+              
+              <span class="doc doc-pending" title="Not published yet">Design</span>, 
+          
+            
+              
+              <span class="doc doc-pending" title="Not published yet">Test</span>, 
+          
+            
+              
+              <span class="doc doc-pending" title="Not published yet">Presentation</span>, 
+          
+            
+              
+              <span class="doc doc-pending" title="Not published yet">Progress Evaluation</span>
+          
+        </td>
+      </tr>
+      
+      <tr>
+        <th scope="row">Milestone 2 <span class="due">(Oct 26)</span></th>
+        <td>
+          
+            
+              
+              <span class="doc doc-pending" title="Not published yet">Presentation</span>, 
+          
+            
+              
+              <span class="doc doc-pending" title="Not published yet">Progress Evaluation</span>
+          
+        </td>
+      </tr>
+      
+      <tr>
+        <th scope="row">Milestone 3 <span class="due">(Nov 23)</span></th>
+        <td>
+          
+            
+              
+              <span class="doc doc-pending" title="Not published yet">Presentation</span>, 
+          
+            
+              
+              <span class="doc doc-pending" title="Not published yet">Progress Evaluation</span>
+          
+        </td>
+      </tr>
+      
+    </tbody>
+  </table>
+  
+</section>
+
+
+<section class="hero">
+  <p class="eyebrow">Florida Tech senior design &middot; 2026-2027</p>
+  <h1>A rootkit can lie to every tool inside the machine.<br><span class="hl">It cannot lie to the hypervisor.</span></h1>
+  <p class="lede">
+    RootView detects eBPF rootkits in a running Linux guest by reading the guest's
+    kernel memory from outside the guest, on the KVM host, where the malware has no
+    way to reach.
+  </p>
+  
+  
+</section>
+
+
+<section class="section">
+  <h2 class="section-title">Algorithms and tools</h2>
+  <div class="tool-grid">
+    
+    <div class="tool">
+      <strong>KVM/QEMU</strong>
+      <span>Virtualization</span>
+    </div>
+    
+    <div class="tool">
+      <strong>LibVMI</strong>
+      <span>Virtual machine introspection</span>
+    </div>
+    
+    <div class="tool">
+      <strong>Page-table walking</strong>
+      <span>Address translation</span>
+    </div>
+    
+    <div class="tool">
+      <strong>BTF/DWARF and kernel profiles</strong>
+      <span>Interpreting Linux kernel structures</span>
+    </div>
+    
+    <div class="tool">
+      <strong>eBPF</strong>
+      <span>Kernel telemetry</span>
+    </div>
+    
+    <div class="tool">
+      <strong>C/C++</strong>
+      <span>The VMI backend</span>
+    </div>
+    
+    <div class="tool">
+      <strong>Python</strong>
+      <span>The research API and future detection engine</span>
+    </div>
+    
+    <div class="tool">
+      <strong>Web framework</strong>
+      <span>The user interface</span>
+    </div>
+    
+  </div>
+</section>
+
+
+<section class="section">
+  <h2 class="section-title">Technical challenges</h2>
+  <div class="challenge-grid">
+    
+    <article class="challenge">
+      <h3>KVM and VMI</h3>
+      <p>The team has limited experience with KVM and VMI and must learn how to access guest memory, processor state, and page tables from outside the guest.</p>
+    </article>
+    
+    <article class="challenge">
+      <h3>Linux kernel introspection</h3>
+      <p>Kernel structures change between versions, so RootView must investigate ways to identify and interpret structures without relying entirely on hardcoded offsets.</p>
+    </article>
+    
+    <article class="challenge">
+      <h3>eBPF malware</h3>
+      <p>The team must learn how eBPF works internally, how it can be abused by rootkits, and what characteristics of malicious activity can be observed.</p>
+    </article>
+    
+  </div>
+</section>
+
+
+<section class="section">
+  <h2 class="section-title">Milestones</h2>
+  <div class="milestones">
+    
+      
+      <article class="milestone">
+        <header>
+          <h3>Milestone 1</h3>
+          <span class="due">Sep 28</span>
+        </header>
+        <p class="milestone-summary">Establishes the basic VMI infrastructure.</p>
+        <ul class="tasks">
+          
+          <li>Select KVM/QEMU, LibVMI, web framework, and initial eBPF tools</li>
+          
+          <li>Create simple tooling for setting up an Ubuntu VM</li>
+          
+          <li>Connect to a running guest through LibVMI</li>
+          
+          <li>Read physical and virtual guest memory</li>
+          
+          <li>Investigate address translation</li>
+          
+          <li>Retrieve basic register state</li>
+          
+          <li>Begin process introspection</li>
+          
+          <li>Serve a basic test page</li>
+          
+          <li>Complete the Requirements Document</li>
+          
+          <li>Complete the Design Document</li>
+          
+          <li>Complete the Test Plan</li>
+          
+        </ul>
+      </article>
+      
+      <article class="milestone">
+        <header>
+          <h3>Milestone 2</h3>
+          <span class="due">Oct 26</span>
+        </header>
+        <p class="milestone-summary">Expands RootView into a Linux and eBPF introspection platform.</p>
+        <ul class="tasks">
+          
+          <li>Linux kernel introspection</li>
+          
+          <li>BTF/DWARF and kernel symbol investigation</li>
+          
+          <li>Process and kernel object enumeration</li>
+          
+          <li>eBPF introspection</li>
+          
+          <li>Integration of VMI and eBPF observations</li>
+          
+          <li>Web interface improvements</li>
+          
+          <li>Initial kernel-version testing</li>
+          
+        </ul>
+      </article>
+      
+      <article class="milestone">
+        <header>
+          <h3>Milestone 3</h3>
+          <span class="due">Nov 23</span>
+        </header>
+        <p class="milestone-summary">Turns the backend into a reusable research platform.</p>
+        <ul class="tasks">
+          
+          <li>C/C++ API for VM, OS, memory, and eBPF introspection</li>
+          
+          <li>Python bindings</li>
+          
+          <li>High-level Python interface</li>
+          
+          <li>Error handling and testing</li>
+          
+          <li>Linux kernel version compatibility</li>
+          
+          <li>Kernel profile improvements</li>
+          
+          <li>API documentation</li>
+          
+          <li>Stable interface for the future detection engine</li>
+          
+        </ul>
+      </article>
+      
+    
+  </div>
+</section>
+
+
+  </main>
+
+  
+</body>
+</html>

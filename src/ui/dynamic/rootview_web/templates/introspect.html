@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}RootView - Introspection{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>eBPF state</h2>
+    <form method="get" action="/introspect" class="vm-picker">
+      <label for="vm">Guest</label>
+      <select name="vm" id="vm" onchange="this.form.submit()">
+        {% for vm in vms %}
+        <option value="{{ vm.vm_id }}" {{ 'selected' if vm.vm_id == selected }}
+                {{ 'disabled' if vm.state.value != 'running' }}>
+          {{ vm.name }}{% if vm.state.value != 'running' %} ({{ vm.state.value.replace('_', ' ') }}){% endif %}
+        </option>
+        {% endfor %}
+      </select>
+      <noscript><button class="btn" type="submit">Go</button></noscript>
+    </form>
+  </div>
+
+  {% if not connected %}
+  <p class="empty">
+    No introspection backend is connected, so there is no guest kernel memory to read.
+  </p>
+  {% elif error %}
+  <p class="error">Introspection failed: {{ error }}</p>
+  {% elif snapshot is none %}
+  <p class="empty">No running guest to inspect.</p>
+  {% else %}
+
+  <p class="muted">
+    Read directly from guest kernel memory at
+    {{ snapshot.captured_at.strftime('%Y-%m-%d %H:%M:%S') }} UTC.
+    Rows marked <span class="pill hidden-pill">hidden</span> exist in the kernel but are
+    <em>not</em> reported by the guest's own tooling.
+  </p>
+
+  <h3 class="table-title">Programs <span class="muted">({{ snapshot.programs | length }})</span></h3>
+  <div class="table-scroll">
+    <table class="data">
+      <thead>
+        <tr>
+          <th>ID</th><th>Name</th><th>Type</th><th>Attached to</th>
+          <th>Loader</th><th>Helpers</th><th>Tag</th><th>Visibility</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in snapshot.programs %}
+        <tr class="{{ 'row-hidden' if p.visibility.value == 'hidden' }}">
+          <td class="num">{{ p.prog_id }}</td>
+          <td><code>{{ p.name }}</code></td>
+          <td>{{ p.prog_type.value }}</td>
+          <td>
+            {% for a in p.attach_points %}
+              <code>{{ a.target }}</code>{{ ', ' if not loop.last }}
+            {% else %}
+              <span class="muted">not attached</span>
+            {% endfor %}
+          </td>
+          <td>
+            {% if p.loader_comm %}
+              <code>{{ p.loader_comm }}</code>
+              <span class="muted">uid {{ p.loader_uid }}</span>
+            {% else %}
+              <span class="muted">unknown</span>
+            {% endif %}
+          </td>
+          <td class="helpers">
+            {% for h in p.helpers %}
+              <code class="{{ 'danger' if h in ('bpf_probe_write_user', 'bpf_override_return') }}">{{ h }}</code>
+            {% endfor %}
+          </td>
+          <td><code class="tag">{{ p.tag }}</code></td>
+          <td>
+            <span class="pill {{ 'hidden-pill' if p.visibility.value == 'hidden' }}">
+              {{ p.visibility.value }}
+            </span>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="empty">No eBPF programs loaded.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <h3 class="table-title">Maps <span class="muted">({{ snapshot.maps | length }})</span></h3>
+  <div class="table-scroll">
+    <table class="data">
+      <thead>
+        <tr>
+          <th>ID</th><th>Name</th><th>Type</th><th>Key</th>
+          <th>Value</th><th>Max entries</th><th>Visibility</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in snapshot.maps %}
+        <tr class="{{ 'row-hidden' if m.visibility.value == 'hidden' }}">
+          <td class="num">{{ m.map_id }}</td>
+          <td><code>{{ m.name }}</code></td>
+          <td>{{ m.map_type.value }}</td>
+          <td class="num">{{ m.key_size }}B</td>
+          <td class="num">{{ m.value_size }}B</td>
+          <td class="num">{{ m.max_entries }}</td>
+          <td>
+            <span class="pill {{ 'hidden-pill' if m.visibility.value == 'hidden' }}">
+              {{ m.visibility.value }}
+            </span>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="7" class="empty">No eBPF maps loaded.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>RootView.initIntrospect({{ (selected | tojson) if selected else 'null' }});</script>
+{% endblock %}

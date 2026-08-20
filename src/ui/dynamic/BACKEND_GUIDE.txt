@@ -1,0 +1,426 @@
+===============================================================================
+1. HOW I WAS RUNNING WEBSITE FOR TESTING
+===============================================================================
+
+From the `web/` directory:
+
+    python3 -m venv .venv
+    .venv/bin/pip install -e ".[dev]"
+    .venv/bin/python -m rootview_web
+
+Open http://127.0.0.1:8000
+
+You will see the site with a banner saying no introspection backend is
+connected.
+
+Run the tests too, so you know the baseline is green:
+
+    .venv/bin/python -m pytest
+
+auto-reload:
+    .venv/bin/uvicorn rootview_web.app:app --reload
+
+
+===============================================================================
+2. HOW THE PIECES FIT
+===============================================================================
+
+    +------------------+
+    |   GUEST VM       |   untrusted. May be lying.
+    |   kernel memory  |
+    +------------------+
+             ^
+             | you read this with LibVMI
+             |
+    +--------------------------------------------------------------+
+    |  KVM HOST                                                     |
+    |                                                               |
+    |   [ CODE ]         backends/libvmi.py                         |
+    |         |                                                     |
+    |         v                                                     |
+    |   detection rules       detection.py                          |
+    |         |                                                     |
+    |         v                                                     |
+    |   scanner loop          services.py                           |
+    |         |                                                     |
+    |         v                                                     |
+    |   event bus -> SSE      events.py                             |
+    |         |                                                     |
+    |         v                                                     |
+    |   browser                                                     |
+    +--------------------------------------------------------------+
+
+Two consequences worth understanding before you start:
+
+  * IT IS PULL-BASED. Nothing in the guest notifies the host when an eBPF
+    program is loaded. There is no callback to subscribe to. So RootView polls:
+    a background loop calls your `scan()` on every running guest every few
+    seconds. You do not need to push anything anywhere. Just answer when asked.
+
+  * DETECTION IS NOT YOUR JOB. Deciding what is suspicious already exists in
+    `rootview_web/detection.py` and works on any backend. Your job is to report
+    WHAT IS THERE, accurately. The rules decide what it means.
+
+
+===============================================================================
+3. libvmi
+===============================================================================
+
+    rootview_web/backends/libvmi.py
+
+It contains one class, `LibVMIBackend`, with six methods. Every one of them
+currently does this:
+
+    raise NotImplementedError("... is not implemented yet")
+
+Replace those bodies with real implementations. Each method already has a
+docstring describing what it must return; this document is the longer version.
+
+Why they raise instead of returning empty lists: an empty list is
+indistinguishable from "this guest is clean". RootView must never imply a clean
+result it did not actually establish.
+
+For reference:
+
+    rootview_web/backends/base.py           the interface + the two exceptions
+    rootview_web/backends/unconfigured.py   a tiny complete implementation
+    rootview_web/schemas.py                 every data shape you must return
+    tests/conftest.py                       a working fake backend to copy from
+
+`tests/conftest.py` is the most useful of these. It contains `FakeBackend`,
+which is a complete, working implementation of the same interface using
+hardcoded data for like bs testing idk
+
+
+===============================================================================
+4. THE SIX METHODS
+===============================================================================
+
+All of them are `async def`. If your LibVMI calls are blocking C calls (they
+probably are), wrap them so they do not stall the web server:
+
+    result = await asyncio.to_thread(my_blocking_libvmi_call, args)
+
+-------------------------------------------------------------------------------
+.1  connected  ->  bool          (a property, not a method)
+-------------------------------------------------------------------------------
+
+Return True only when introspection genuinely works right now.
+
+This one property decides whether the interface is allowed to tell the user
+their system looks clean. While it is False the dashboard says "No introspection
+backend connected". While it is True and a scan finds nothing, the dashboard
+says "No suspicious eBPF activity detected".
+
+Leave it False until you are sure. A wrong True here is a false all-clear, which
+is worse than showing nothing at all.
+
+-------------------------------------------------------------------------------
+.2  async startup()  ->  None
+-------------------------------------------------------------------------------
+
+Called once when the web server boots. Initialise LibVMI, open the guest, load
+kernel symbols/profiles here.
+
+If it fails, raise `BackendError`. The web server stays up and reports the
+failure rather than refusing to start.
+
+-------------------------------------------------------------------------------
+.3  async shutdown()  ->  None
+-------------------------------------------------------------------------------
+
+Called once when the server stops. Close handles, free LibVMI resources.
+
+-------------------------------------------------------------------------------
+.4  async list_vms()  ->  list[VM]
+-------------------------------------------------------------------------------
+
+Every guest this host can introspect. IMPLEMENT THIS ONE FIRST - it is the
+least coupled to eBPF parsing and it makes the whole interface come alive.
+
+    VM(
+        vm_id  = "unique-stable-id",   # REQUIRED. Used in every URL.
+        name   = "human readable",     # REQUIRED. Shown in the interface.
+        state  = VMState.RUNNING,      # REQUIRED. See below.
+        guest  = GuestInfo(
+            kernel_release = "6.8.0-40-generic",
+            architecture   = "x86_64",
+            profile_loaded = True,
+        ),
+    )
+
+VMState is one of: RUNNING, PAUSED, SHUT_OFF, UNREACHABLE
+Only RUNNING guests get scanned.
+
+Set `profile_loaded=False` when you could not resolve kernel symbols for that
+guest. The interface then warns the user that findings for it are unreliable.
+Be honest here; wrong offsets produce confident nonsense.
+
+-------------------------------------------------------------------------------
+.5  async get_vm(vm_id)  ->  VM
+-------------------------------------------------------------------------------
+
+One guest by id.
+
+If the id is not recognised, raise `UnknownVMError`. The API turns that into a
+404 automatically. Do not return None.
+
+-------------------------------------------------------------------------------
+.6  async snapshot(vm_id)  ->  BpfSnapshot
+-------------------------------------------------------------------------------
+
+Read the guest's current eBPF state. No detection logic just report what is there.
+
+Walk the guest's program and map IDR structures and build:
+
+    BpfSnapshot(
+        vm_id    = vm_id,
+        programs = [ BpfProgram(...), ... ],
+        maps     = [ BpfMap(...), ... ],
+    )
+
+BpfProgram - required fields:
+
+    prog_id       int    kernel program id
+    name          str    program name
+    prog_type     BpfProgType
+    tag           str    the kernel's 8-byte instruction hash, hex encoded
+
+BpfProgram - optional but valuable (omit what you cannot get yet):
+
+    attach_points  list[AttachPoint]  where it is hooked. Drives several rules.
+    helpers        list[str]          helper functions it calls, e.g.
+                                      "bpf_probe_write_user". Drives a rule.
+    visibility     Visibility         see section 6. THE IMPORTANT ONE.
+    pinned_path    str                bpffs path if pinned, else None
+    loader_uid     int                uid that loaded it
+    loader_pid     int                pid that loaded it
+    loader_comm    str                process name that loaded it
+    loaded_at      datetime
+    jited          bool
+    bytes_xlated   int
+    bytes_jited    int
+    map_ids        list[int]
+
+    AttachPoint(kind=BpfProgType.TRACEPOINT, target="sys_getdents64")
+      `target` is the kernel symbol, tracepoint or interface name. Both
+      "sys_getdents64" and "syscalls:sys_getdents64" are matched correctly.
+
+BpfMap - required fields:
+
+    map_id      int
+    name        str
+    map_type    BpfMapType
+    key_size    int     bytes
+    value_size  int     bytes
+    max_entries int
+
+BpfMap - optional:
+
+    visibility  Visibility     see section 6
+    loaded_at   datetime
+
+Enum values (use UNKNOWN rather than guessing - kernels add new types):
+
+  BpfProgType: socket_filter, kprobe, tracepoint, raw_tracepoint, xdp,
+               perf_event, cgroup_skb, sched_cls, sched_act, lsm, tracing,
+               struct_ops, syscall, unknown
+
+  BpfMapType:  hash, array, prog_array, perf_event_array, percpu_hash,
+               percpu_array, stack_trace, lru_hash, lpm_trie, ringbuf,
+               sk_storage, task_storage, unknown
+
+SPECIAL CASE: a guest that is not running has no kernel state to read. Return
+an empty snapshot, do NOT raise:
+
+    return BpfSnapshot(vm_id=vm_id)
+
+"Nothing is loaded" is a true answer for a powered-off machine.
+
+-------------------------------------------------------------------------------
+.7  async scan(vm_id)  ->  ScanResult
+-------------------------------------------------------------------------------
+
+Take a snapshot and run the detection rules over it. This one is nearly free,
+because the rules are already written:
+
+    from datetime import datetime, timezone
+    from rootview_web.detection import run_rules
+
+    async def scan(self, vm_id):
+        started = datetime.now(timezone.utc)
+        snap = await self.snapshot(vm_id)
+        return ScanResult(
+            vm_id             = vm_id,
+            started_at        = started,
+            finished_at       = datetime.now(timezone.utc),
+            detections        = run_rules(snap),
+            programs_examined = len(snap.programs),
+            maps_examined     = len(snap.maps),
+            errors            = [],          # anything that went wrong
+        )
+
+Put problems you hit mid-scan into `errors` as strings rather than raising. A
+partial result is more useful to the user than no result.
+
+You never construct Detection objects by hand. `run_rules` does that.
+
+
+===============================================================================
+5. THE VISIBILITY FIELD
+===============================================================================
+
+Every BpfProgram and BpfMap carries a `visibility` field with three possible
+values:
+
+    Visibility.VISIBLE     the hypervisor and the guest agree this exists
+    Visibility.HIDDEN      you see it in kernel memory, the guest does not
+                           report it  ->  SOMETHING IS CONCEALING IT
+    Visibility.UNCHECKED   you did not compare against the guest at all
+
+HIDDEN generates a CRITICAL finding. It is the flagship detection of this
+entire project.
+
+Therefore: only set HIDDEN when you actually asked the guest for its own list
+and it genuinely disagreed with what you read from memory.
+
+If you never asked the guest - because you have not built that comparison yet,
+or the guest agent was unreachable, or it is simply not implemented - use
+UNCHECKED. Never HIDDEN.
+
+UNCHECKED exists precisely so that "I don't know" is expressible. If you default
+to HIDDEN you will manufacture critical security alerts out of nothing, and
+nobody will trust the tool again.
+
+The default value if you omit the field entirely is UNCHECKED, which is the safe
+choice. It means that field is optional in the early stages: you can build
+snapshot() first and add the guest-side comparison later without ever producing
+a false alarm.
+
+
+===============================================================================
+6. ERROR HANDLING
+===============================================================================
+
+Two exception types, both from `rootview_web.backends.base`:
+
+    BackendError     something expected went wrong: guest paged out, guest
+                     paused, kernel profile mismatch, LibVMI unavailable.
+                     The UI shows this to the user as a problem to fix.
+                     -> API returns 502
+
+    UnknownVMError   the vm_id does not exist. Subclass of BackendError.
+                     -> API returns 404
+
+Anything else that escapes is treated as a bug in the web server. So wrap your
+LibVMI failures in BackendError with a message a human can act on:
+
+    raise BackendError(f"could not read task_struct for {vm_id}: {err}")
+
+While methods are still unimplemented and raising NotImplementedError, the
+server handles that gracefully too: pages still render, the API returns 501,
+and the log warns once per scan pass instead of spewing tracebacks. You can
+develop with the site running in front of you.
+
+
+===============================================================================
+7. TURNING IT ON
+===============================================================================
+
+The backend is selected by an environment variable. One line in
+`rootview_web/app.py` maps the name to your class; it is already written.
+
+    ROOTVIEW_BACKEND=libvmi .venv/bin/python -m rootview_web
+
+Other settings:
+
+    ROOTVIEW_BACKEND         "none" (default) or "libvmi"
+    ROOTVIEW_SCAN_INTERVAL   seconds between scans, default 5.0
+    ROOTVIEW_HOST            default 127.0.0.1
+    ROOTVIEW_PORT            default 8000
+
+If your backend needs its own configuration (socket paths, profile directory),
+add real keyword arguments to `LibVMIBackend.__init__` - it currently accepts
+`**options` as a placeholder - then add matching fields to
+`rootview_web/config.py` and pass them through in `app.py:build_backend`.
+
+
+===============================================================================
+8. CHECKING YOUR WORK
+===============================================================================
+
+Fastest loop - hit the API directly, no browser needed:
+
+    curl -s localhost:8000/api/health          # is a backend connected?
+    curl -s localhost:8000/api/vms             # your list_vms output
+    curl -s localhost:8000/api/vms/ID/snapshot # your snapshot output
+    curl -s -X POST localhost:8000/api/vms/ID/scan   # snapshot + rules
+
+`/docs` in a browser gives you a clickable version of all of these with the
+exact schemas.
+
+The existing test suite runs without any VM and must stay green:
+
+    .venv/bin/python -m pytest
+
+To test your backend without a real guest, copy the pattern in
+`tests/conftest.py`. To test it against a real guest, write tests that are
+skipped when no guest is available, so the suite still runs on a laptop.
+
+
+===============================================================================
+9. Random Notes
+===============================================================================
+
+  * Editing a .py file does nothing until the server restarts. Use --reload.
+
+  * Do not return an empty list to mean "nothing found" when you actually mean
+    "not implemented" or "could not read". Raise instead. The difference is the
+    difference between an all-clear and an error, and users act on that.
+
+  * Set `connected` to True only when introspection really works.
+
+  * Never set visibility=HIDDEN without a real comparison against the guest.
+
+  * A powered-off guest returns an empty snapshot, not an exception.
+
+  * Findings are deduplicated by a deterministic id built from
+    (vm_id, rule, subject). This is what stops a standing finding from
+    re-alerting every five seconds. It relies on prog_id / map_id being stable
+    between scans for the same object. If you invent new ids on every scan, the
+    user gets spammed with duplicate alerts.
+
+  * Blocking C calls will freeze the whole web server if you call them directly
+    from an async method. Use `await asyncio.to_thread(...)`.
+
+
+===============================================================================
+10. FILE MAP
+===============================================================================
+
+    rootview_web/
+      backends/
+        base.py          the interface you implement + exceptions
+        libvmi.py        <-- Six stubs to fill in.
+        unconfigured.py  the do-nothing default backend
+      schemas.py         every data shape (VM, BpfProgram, BpfMap, ...)
+      detection.py       the 7 detection rules. Already done. Backend-agnostic.
+      services.py        the polling loop that calls your scan()
+      events.py          in-memory event bus + server-sent events
+      app.py             wiring; build_backend() picks your class
+      config.py          environment variable settings
+      deliverables.py    course document links on the landing page
+      routers/           HTTP endpoints and HTML pages
+      templates/         the pages
+      static/            css and js
+
+    tests/
+      conftest.py        FakeBackend - a working example of your interface
+      test_detection.py  the rules, tested in isolation
+      test_api.py        endpoints and pages
+      test_events.py     event bus and scanner loop
+
+    README.md            project overview
+    BACKEND_GUIDE.txt    this file
+
+===============================================================================

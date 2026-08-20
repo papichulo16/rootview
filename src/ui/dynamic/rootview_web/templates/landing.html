@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}RootView: hypervisor-based eBPF rootkit detection{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', path='/css/landing.css') }}">
+{% endblock %}
+
+{% block content %}
+
+{# ---------- course project header ----------
+   Identity and the deliverables index, first thing on the page so anyone
+   looking for a specific document finds it without scrolling.
+
+   Everything here comes from rootview_web/deliverables.py. A document with an
+   empty url renders as inert grey text; fill the url in and it becomes a link. #}
+<section class="project-header">
+  <dl class="pinfo">
+    <div>
+      <dt>Project Name</dt>
+      <dd>{{ project_name }}</dd>
+    </div>
+    <div>
+      <dt>Team Members and Email Addresses</dt>
+      <dd>
+        <ul class="people">
+          {% for name, email in team %}
+          <li>{{ name }} &middot; <a href="mailto:{{ email }}">{{ email }}</a></li>
+          {% endfor %}
+        </ul>
+      </dd>
+    </div>
+    <div>
+      <dt>Faculty Advisor</dt>
+      <dd>{{ advisor[0] }} &middot; <a href="mailto:{{ advisor[1] }}">{{ advisor[1] }}</a></dd>
+    </div>
+  </dl>
+
+  {% for semester in semesters %}
+  <h2 class="semester-title">{{ semester.label }}</h2>
+  <table class="deliverables">
+    <tbody>
+      {% for row in semester.rows %}
+      <tr>
+        <th scope="row">{{ row.milestone }} <span class="due">({{ row.due }})</span></th>
+        <td>
+          {% for doc in row.documents %}
+            {% if doc.url %}
+              <a class="doc" href="{{ doc.url }}">{{ doc.label }}</a>
+            {%- else %}
+              {# No url yet. Rendered as text rather than a dead link so nobody
+                 clicks it expecting a document that does not exist. #}
+              <span class="doc doc-pending" title="Not published yet">{{ doc.label }}</span>
+            {%- endif %}
+            {{- ', ' if not loop.last }}
+          {% endfor %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endfor %}
+</section>
+
+{# ---------- hero ---------- #}
+<section class="hero">
+  <p class="eyebrow">Florida Tech senior design &middot; 2026-2027</p>
+  <h1>A rootkit can lie to every tool inside the machine.<br><span class="hl">It cannot lie to the hypervisor.</span></h1>
+  <p class="lede">
+    RootView detects eBPF rootkits in a running Linux guest by reading the guest's
+    kernel memory from outside the guest, on the KVM host, where the malware has no
+    way to reach.
+  </p>
+  {# Both of these describe a running server. The standalone project page has
+     none, so they are omitted there rather than linking nowhere. #}
+  {% if not static_build %}
+  <div class="cta-row">
+    <a class="btn primary" href="/dashboard">Open the dashboard</a>
+    <a class="btn" href="/introspect">Inspect a guest</a>
+    <a class="btn ghost" href="/docs">API reference</a>
+  </div>
+  <p class="hero-status">
+    {% if not connected %}
+      No introspection backend connected
+    {% elif running_count %}
+      Watching <strong>{{ running_count }}</strong> running guest{{ '' if running_count == 1 else 's' }}
+    {% else %}
+      No running guests right now
+    {% endif %}
+  </p>
+  {% endif %}
+</section>
+
+{# ---------- algorithms and tools ---------- #}
+<section class="section">
+  <h2 class="section-title">Algorithms and tools</h2>
+  <div class="tool-grid">
+    {% for tool, purpose in tools %}
+    <div class="tool">
+      <strong>{{ tool }}</strong>
+      <span>{{ purpose }}</span>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+{# ---------- technical challenges ---------- #}
+<section class="section">
+  <h2 class="section-title">Technical challenges</h2>
+  <div class="challenge-grid">
+    {% for title, detail in challenges %}
+    <article class="challenge">
+      <h3>{{ title }}</h3>
+      <p>{{ detail }}</p>
+    </article>
+    {% endfor %}
+  </div>
+</section>
+
+{# ---------- milestones ----------
+   Driven by the same rows as the deliverables table at the top of the page, so
+   the dates cannot drift apart. Rows without tasks (the Plan row) are skipped. #}
+<section class="section">
+  <h2 class="section-title">Milestones</h2>
+  <div class="milestones">
+    {% for semester in semesters %}
+      {% for row in semester.rows if row.tasks %}
+      <article class="milestone">
+        <header>
+          <h3>{{ row.milestone }}</h3>
+          <span class="due">{{ row.due }}</span>
+        </header>
+        {% if row.summary %}<p class="milestone-summary">{{ row.summary }}</p>{% endif %}
+        <ul class="tasks">
+          {% for task in row.tasks %}
+          <li>{{ task }}</li>
+          {% endfor %}
+        </ul>
+      </article>
+      {% endfor %}
+    {% endfor %}
+  </div>
+</section>
+
+{% endblock %}
