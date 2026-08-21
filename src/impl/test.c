@@ -38,6 +38,9 @@ int main(void) {
     printf("-- create --\n");
     vm_config_t cfg;
     vm_config_default(&cfg, name);
+    snprintf(cfg.cdrom, sizeof(cfg.cdrom), "%s",
+             ".rootview/isos/alpine-standard-3.24.1-x86_64.iso");
+    cfg.display = VM_DISPLAY_GTK;
     check(vm_create(&cfg, err, sizeof(err)) == 0, "vm_create succeeds");
     check(vm_create(&cfg, err, sizeof(err)) != 0, "vm_create rejects a duplicate name");
 
