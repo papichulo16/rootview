@@ -15,7 +15,7 @@ static void print_usage(void) {
             "commands:\n"
             "  create <name> [--config <file>] [--memory <mb>] [--cpus <n>]\n"
             "                [--disk <path>] [--cdrom <path>] [--network none|user|tap]\n"
-            "                [--display none|gtk|vnc] [--no-kvm] [--extra-args \"<args>\"]\n"
+            "                [--display none|gtk|vnc] [--no-kvm] [--no-kvmi] [--extra-args \"<args>\"]\n"
             "  start <name>              boot a created vm\n"
             "  stop <name>               gracefully shut a vm down\n"
             "  restart <name>            stop then start\n"
@@ -62,6 +62,8 @@ static int cmd_create(int argc, char **argv) {
             cfg.display = vm_display_mode_parse(argv[++i]);
         } else if (strcmp(argv[i], "--no-kvm") == 0) {
             cfg.use_kvm = false;
+        } else if (strcmp(argv[i], "--no-kvmi") == 0) {
+            cfg.kvmi_enabled = false;
         } else if (strcmp(argv[i], "--extra-args") == 0 && i + 1 < argc) {
             snprintf(cfg.extra_args, sizeof(cfg.extra_args), "%s", argv[++i]);
         } else {

@@ -14,6 +14,7 @@ void vm_config_default(vm_config_t *cfg, const char *name) {
     cfg->network = VM_NET_USER;
     cfg->display = VM_DISPLAY_NONE;
     cfg->use_kvm = true;
+    cfg->kvmi_enabled = true;
 }
 
 int vm_config_from_json_file(const char *path, vm_config_t *cfg, char *err, size_t err_len) {
@@ -30,6 +31,7 @@ int vm_config_from_json_file(const char *path, vm_config_t *cfg, char *err, size
     cfg->memory_mb = (int) json_get_int(root, "memory_mb", cfg->memory_mb);
     cfg->cpus = (int) json_get_int(root, "cpus", cfg->cpus);
     cfg->use_kvm = json_get_bool(root, "kvm", cfg->use_kvm);
+    cfg->kvmi_enabled = json_get_bool(root, "kvmi_enabled", cfg->kvmi_enabled);
 
     const char *disk = json_get_string(root, "disk_image", NULL);
     if (disk) snprintf(cfg->disk_image, sizeof(cfg->disk_image), "%s", disk);
@@ -63,6 +65,7 @@ int vm_config_save(const vm_config_t *cfg) {
     json_object_set_int(root, "memory_mb", cfg->memory_mb);
     json_object_set_int(root, "cpus", cfg->cpus);
     json_object_set_bool(root, "kvm", cfg->use_kvm);
+    json_object_set_bool(root, "kvmi_enabled", cfg->kvmi_enabled);
     json_object_set_string(root, "disk_image", cfg->disk_image);
     json_object_set_string(root, "cdrom", cfg->cdrom);
     json_object_set_string(root, "network", vm_net_mode_str(cfg->network));

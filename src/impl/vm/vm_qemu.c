@@ -16,12 +16,13 @@ static void split_extra_args(char *buf, char **argv, int *argc, int max) {
 }
 
 static int build_argv(const vm_config_t *cfg, const char *qmp_socket, const char *monitor_socket,
-                       char *argv[], int max_args) {
+                       const char *kvmi_socket, char *argv[], int max_args) {
     static char mem_arg[32];
     static char smp_arg[32];
     static char drive_arg[PATH_MAX + 32];
     static char qmp_arg[PATH_MAX + 32];
     static char mon_arg[PATH_MAX + 32];
+    static char kvmi_arg[PATH_MAX + 32];
     static char extra_buf[512];
 
     int argc = 0;
@@ -77,6 +78,16 @@ static int build_argv(const vm_config_t *cfg, const char *qmp_socket, const char
     argv[argc++] = "-monitor";
     argv[argc++] = mon_arg;
 
+    /* qemu connects out to the vmi module's listening socket, retrying
+     * until something's there to accept it - see vmi_attach(). */
+    if (kvmi_socket && kvmi_socket[0]) {
+        snprintf(kvmi_arg, sizeof(kvmi_arg), "socket,path=%s,id=kvmi_chardev,reconnect-ms=10000", kvmi_socket);
+        argv[argc++] = "-chardev";
+        argv[argc++] = kvmi_arg;
+        argv[argc++] = "-object";
+        argv[argc++] = "introspection,id=kvmi,chardev=kvmi_chardev";
+    }
+
     snprintf(extra_buf, sizeof(extra_buf), "%s", cfg->extra_args);
     split_extra_args(extra_buf, argv, &argc, max_args);
 
@@ -85,9 +96,9 @@ static int build_argv(const vm_config_t *cfg, const char *qmp_socket, const char
 }
 
 int qemu_spawn(const vm_config_t *cfg, const char *qmp_socket, const char *monitor_socket,
-               const char *log_path, pid_t *out_pid) {
+               const char *kvmi_socket, const char *log_path, pid_t *out_pid) {
     char *argv[64];
-    build_argv(cfg, qmp_socket, monitor_socket, argv, 64);
+    build_argv(cfg, qmp_socket, monitor_socket, kvmi_socket, argv, 64);
 
     pid_t pid = fork();
     if (pid < 0) return -1;
