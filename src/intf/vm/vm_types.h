@@ -34,6 +34,7 @@ typedef struct {
     vm_net_mode_t network;
     vm_display_mode_t display;
     bool use_kvm;
+    bool kvmi_enabled; /* exposes a kvmi introspection socket for the vmi module to attach to */
     char extra_args[512]; /* raw passthrough, space separated */
 } vm_config_t;
 
@@ -42,6 +43,7 @@ typedef struct {
     pid_t pid;
     char qmp_socket[PATH_MAX];
     char monitor_socket[PATH_MAX];
+    char kvmi_socket[PATH_MAX]; /* empty when kvmi_enabled was off at start */
     time_t started_at;
 } vm_runtime_state_t;
 

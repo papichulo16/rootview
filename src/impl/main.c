@@ -2,12 +2,14 @@
 #include <string.h>
 
 #include "vm/vm_cli.h"
+#include "vmi/vmi_cli.h"
 
 static void print_usage(void) {
     fprintf(stderr,
             "usage: rv <module> [args]\n\n"
             "modules:\n"
-            "  vm    manage qemu/kvm virtual machines\n");
+            "  vm    manage qemu/kvm virtual machines\n"
+            "  vmi   introspect a running vm through libvmi\n");
 }
 
 int main(int argc, char **argv) {
@@ -19,6 +21,7 @@ int main(int argc, char **argv) {
     const char *module = argv[1];
 
     if (strcmp(module, "vm") == 0) return vm_cli_main(argc - 2, argv + 2);
+    if (strcmp(module, "vmi") == 0) return vmi_cli_main(argc - 2, argv + 2);
 
     if (strcmp(module, "help") == 0 || strcmp(module, "--help") == 0 || strcmp(module, "-h") == 0) {
         print_usage();

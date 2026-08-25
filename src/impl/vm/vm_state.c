@@ -26,6 +26,8 @@ int vm_state_load(const char *name, vm_runtime_state_t *st) {
     if (qmp) snprintf(st->qmp_socket, sizeof(st->qmp_socket), "%s", qmp);
     const char *mon = json_get_string(root, "monitor_socket", NULL);
     if (mon) snprintf(st->monitor_socket, sizeof(st->monitor_socket), "%s", mon);
+    const char *kvmi = json_get_string(root, "kvmi_socket", NULL);
+    if (kvmi) snprintf(st->kvmi_socket, sizeof(st->kvmi_socket), "%s", kvmi);
 
     json_free(root);
     return 0;
@@ -38,6 +40,7 @@ int vm_state_save(const char *name, const vm_runtime_state_t *st) {
     json_object_set_int(root, "started_at", (long) st->started_at);
     json_object_set_string(root, "qmp_socket", st->qmp_socket);
     json_object_set_string(root, "monitor_socket", st->monitor_socket);
+    json_object_set_string(root, "kvmi_socket", st->kvmi_socket);
 
     char path[PATH_MAX];
     vm_store_state_path(name, path);

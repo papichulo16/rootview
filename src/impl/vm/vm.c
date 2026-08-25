@@ -53,14 +53,15 @@ int vm_start(const char *name, char *err, size_t err_len) {
         return -1;
     }
 
-    char dir[PATH_MAX], qmp[PATH_MAX], mon[PATH_MAX], log[PATH_MAX];
+    char dir[PATH_MAX], qmp[PATH_MAX], mon[PATH_MAX], kvmi[PATH_MAX] = "", log[PATH_MAX];
     vm_store_dir(name, dir);
     snprintf(qmp, sizeof(qmp), "%s/qmp.sock", dir);
     snprintf(mon, sizeof(mon), "%s/monitor.sock", dir);
+    if (cfg.kvmi_enabled) snprintf(kvmi, sizeof(kvmi), "%s/kvmi.sock", dir);
     vm_store_log_path(name, log);
 
     pid_t pid;
-    if (qemu_spawn(&cfg, qmp, mon, log, &pid) != 0) {
+    if (qemu_spawn(&cfg, qmp, mon, kvmi, log, &pid) != 0) {
         if (err) snprintf(err, err_len, "qemu failed to start, see %s", log);
         return -1;
     }
@@ -71,6 +72,7 @@ int vm_start(const char *name, char *err, size_t err_len) {
     st.started_at = time(NULL);
     snprintf(st.qmp_socket, sizeof(st.qmp_socket), "%s", qmp);
     snprintf(st.monitor_socket, sizeof(st.monitor_socket), "%s", mon);
+    snprintf(st.kvmi_socket, sizeof(st.kvmi_socket), "%s", kvmi);
     vm_state_save(name, &st);
     return 0;
 }
@@ -143,6 +145,7 @@ void vm_inspect(const char *name) {
         printf("uptime:      %lds\n", (long) (time(NULL) - st.started_at));
         printf("qmp socket:  %s\n", st.qmp_socket);
         printf("monitor:     %s\n", st.monitor_socket);
+        printf("kvmi socket: %s\n", st.kvmi_socket[0] ? st.kvmi_socket : "(none)");
     }
     printf("memory:      %d MB\n", cfg.memory_mb);
     printf("cpus:        %d\n", cfg.cpus);
