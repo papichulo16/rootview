@@ -26,7 +26,8 @@ static bool vm_is_alive(const char *name) {
     return vm_state_is_alive(&st);
 }
 
-int main(void) {
+
+int vm_test(void) {
     const char *name = "rv-smoketest";
     char err[256];
 
@@ -39,7 +40,7 @@ int main(void) {
     vm_config_t cfg;
     vm_config_default(&cfg, name);
     snprintf(cfg.cdrom, sizeof(cfg.cdrom), "%s",
-             ".rootview/isos/alpine-standard-3.24.1-x86_64.iso");
+             ".rootview/isos/ubuntu-26.04-desktop-amd64.iso");
     cfg.display = VM_DISPLAY_GTK;
     check(vm_create(&cfg, err, sizeof(err)) == 0, "vm_create succeeds");
     check(vm_create(&cfg, err, sizeof(err)) != 0, "vm_create rejects a duplicate name");
@@ -78,3 +79,10 @@ int main(void) {
     printf("\n== %d/%d checks passed ==\n", checks_run - checks_failed, checks_run);
     return checks_failed == 0 ? 0 : 1;
 }
+
+/*
+int main() {
+
+  return vm_test();
+}
+*/
