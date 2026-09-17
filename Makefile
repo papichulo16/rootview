@@ -8,7 +8,10 @@ CC := gcc
 CFLAGS := -Wall -Wextra -O2 -I$(INTF_DIR) -g $(shell pkg-config --cflags libvmi) 
 
 # have a matching libvmi.so on the loader path anyway.
-LDFLAGS := $(shell pkg-config --libs libvmi) -Wl,-rpath,'$$ORIGIN'
+# -lvirt: vm_qemu.c launches vms through libvirt directly (libvmi's KVMI
+# driver resolves domains by name via libvirt, so qemu has to be started
+# the same way for the name to resolve).
+LDFLAGS := $(shell pkg-config --libs libvmi) -lvirt -Wl,-rpath,'$$ORIGIN'
 
 SRCS := $(shell find $(IMPL_DIR) -name '*.c')
 OBJS := $(patsubst $(IMPL_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))

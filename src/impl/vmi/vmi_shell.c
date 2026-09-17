@@ -12,14 +12,14 @@
 
 static void print_help(void) {
     printf("commands:\n"
-           "  rp <paddr hex> <len>              read physical memory, hex dump\n"
-           "  wp <paddr hex> <hex bytes>        write physical memory\n"
-           "  rv <vaddr hex> <pid> <len>        read virtual memory (pid 0 = kernel)\n"
-           "  wv <vaddr hex> <pid> <hex bytes>  write virtual memory\n"
-           "  pause                             pause the vm\n"
-           "  resume                            resume the vm\n"
-           "  help                              show this message\n"
-           "  quit | exit                       detach and leave the shell\n");
+           "  pause                       pause the vm\n"
+           "  resume                      resume the vm\n"
+           "  rp <paddr hex> <len>        read physical memory, hex dump\n"
+           "  wp <paddr hex> <hex bytes>  write physical memory\n"
+           "  rv <vaddr hex> <len>        read virtual memory (walks the current CR3)\n"
+           "  wv <vaddr hex> <hex bytes>  write virtual memory (walks the current CR3)\n"
+           "  help                        show this message\n"
+           "  quit | exit                 detach and leave the shell\n");
 }
 
 static void hex_dump(uint64_t base, const unsigned char *buf, size_t len) {
@@ -92,16 +92,15 @@ static void cmd_write_phys(vmi_session_t *session, const char *args) {
 
 static void cmd_read_virt(vmi_session_t *session, const char *args) {
     uint64_t vaddr;
-    int32_t pid;
     size_t len;
-    if (sscanf(args, "%" SCNx64 " %" SCNi32 " %zu", &vaddr, &pid, &len) != 3 || len == 0 || len > DUMP_MAX) {
-        printf("usage: rv <vaddr hex> <pid> <len <= %d>\n", DUMP_MAX);
+    if (sscanf(args, "%" SCNx64 " %zu", &vaddr, &len) != 2 || len == 0 || len > DUMP_MAX) {
+        printf("usage: rv <vaddr hex> <len <= %d>\n", DUMP_MAX);
         return;
     }
 
     unsigned char buf[DUMP_MAX];
     char err[256];
-    if (vmi_read_virt(session, vaddr, pid, buf, len, err, sizeof(err)) != 0) {
+    if (vmi_read_virt(session, vaddr, buf, len, err, sizeof(err)) != 0) {
         printf("error: %s\n", err);
         return;
     }
@@ -110,26 +109,25 @@ static void cmd_read_virt(vmi_session_t *session, const char *args) {
 
 static void cmd_write_virt(vmi_session_t *session, const char *args) {
     uint64_t vaddr;
-    int32_t pid;
     int consumed;
-    if (sscanf(args, "%" SCNx64 " %" SCNi32 " %n", &vaddr, &pid, &consumed) != 2) {
-        printf("usage: wv <vaddr hex> <pid> <hex bytes>\n");
+    if (sscanf(args, "%" SCNx64 " %n", &vaddr, &consumed) != 1) {
+        printf("usage: wv <vaddr hex> <hex bytes>\n");
         return;
     }
 
     unsigned char buf[DUMP_MAX];
     size_t len = parse_hex_bytes(args + consumed, buf, sizeof(buf));
     if (len == 0) {
-        printf("usage: wv <vaddr hex> <pid> <hex bytes>\n");
+        printf("usage: wv <vaddr hex> <hex bytes>\n");
         return;
     }
 
     char err[256];
-    if (vmi_write_virt(session, vaddr, pid, buf, len, err, sizeof(err)) != 0) {
+    if (vmi_write_virt(session, vaddr, buf, len, err, sizeof(err)) != 0) {
         printf("error: %s\n", err);
         return;
     }
-    printf("wrote %zu bytes to 0x%" PRIx64 " (pid %d)\n", len, vaddr, pid);
+    printf("wrote %zu bytes to 0x%" PRIx64 "\n", len, vaddr);
 }
 
 static void cmd_pause(vmi_session_t *session) {

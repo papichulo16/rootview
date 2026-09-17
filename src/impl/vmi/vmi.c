@@ -47,6 +47,12 @@ int vmi_attach(const char *vm_name, vmi_session_t *session, char *err, size_t er
         goto out;
     }
 
+    if (VMI_PM_UNKNOWN == vmi_init_paging(session->vmi, 0)) {
+        if (err) snprintf(err, err_len, "failed to determine paging mode for '%s'", vm_name);
+        vmi_destroy(session->vmi);
+        goto out;
+    }
+
     snprintf(session->vm_name, sizeof(session->vm_name), "%s", vm_name);
     session->attached = true;
     rc = 0;
@@ -96,39 +102,63 @@ int vmi_write_phys(vmi_session_t *session, uint64_t paddr, const void *buf, size
     return 0;
 }
 
-int vmi_read_virt(vmi_session_t *session, uint64_t vaddr, int32_t pid, void *buf, size_t len, char *err,
-                   size_t err_len) {
+static int current_dtb(vmi_session_t *session, addr_t *dtb, char *err, size_t err_len) {
+    uint64_t cr3;
+    if (vmi_get_vcpureg(session->vmi, &cr3, CR3, 0) != VMI_SUCCESS) {
+        if (err) snprintf(err, err_len, "failed to read CR3");
+        return -1;
+    }
+    *dtb = cr3 & ~0x1fffull;
+    return 0;
+}
+
+static void dtb_access_context(vmi_session_t *session, addr_t dtb, uint64_t vaddr, access_context_t *ctx) {
+    *ctx = (access_context_t) {
+        .version = ACCESS_CONTEXT_VERSION,
+        .translate_mechanism = VMI_TM_PROCESS_DTB,
+        .dtb = dtb,
+        .pm = vmi_get_page_mode(session->vmi, 0),
+        .addr = vaddr,
+    };
+}
+
+int vmi_read_virt(vmi_session_t *session, uint64_t vaddr, void *buf, size_t len, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");
         return -1;
     }
 
+    addr_t dtb;
+    if (current_dtb(session, &dtb, err, err_len) != 0) return -1;
+
+    access_context_t ctx;
+    dtb_access_context(session, dtb, vaddr, &ctx);
+
     size_t got = 0;
-    status_t rc = vmi_read_va(session->vmi, vaddr, pid, len, buf, &got);
+    status_t rc = vmi_read(session->vmi, &ctx, len, buf, &got);
     if (rc != VMI_SUCCESS || got != len) {
-        if (err) {
-            snprintf(err, err_len, "read_va failed at 0x%lx pid %d (%zu/%zu bytes)", (unsigned long) vaddr, pid, got,
-                     len);
-        }
+        if (err) snprintf(err, err_len, "read failed at 0x%lx (%zu/%zu bytes)", (unsigned long) vaddr, got, len);
         return -1;
     }
     return 0;
 }
 
-int vmi_write_virt(vmi_session_t *session, uint64_t vaddr, int32_t pid, const void *buf, size_t len, char *err,
-                    size_t err_len) {
+int vmi_write_virt(vmi_session_t *session, uint64_t vaddr, const void *buf, size_t len, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");
         return -1;
     }
 
+    addr_t dtb;
+    if (current_dtb(session, &dtb, err, err_len) != 0) return -1;
+
+    access_context_t ctx;
+    dtb_access_context(session, dtb, vaddr, &ctx);
+
     size_t put = 0;
-    status_t rc = vmi_write_va(session->vmi, vaddr, pid, len, (void *) buf, &put);
+    status_t rc = vmi_write(session->vmi, &ctx, len, (void *) buf, &put);
     if (rc != VMI_SUCCESS || put != len) {
-        if (err) {
-            snprintf(err, err_len, "write_va failed at 0x%lx pid %d (%zu/%zu bytes)", (unsigned long) vaddr, pid,
-                     put, len);
-        }
+        if (err) snprintf(err, err_len, "write failed at 0x%lx (%zu/%zu bytes)", (unsigned long) vaddr, put, len);
         return -1;
     }
     return 0;

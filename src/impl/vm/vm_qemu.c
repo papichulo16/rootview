@@ -1,130 +1,210 @@
 #include "vm/vm_qemu.h"
 
-#include <fcntl.h>
+#include <libvirt/libvirt.h>
+#include <libvirt/virterror.h>
+#include <limits.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
-static void split_extra_args(char *buf, char **argv, int *argc, int max) {
-    char *tok = strtok(buf, " \t");
-    while (tok && *argc < max - 1) {
-        argv[(*argc)++] = tok;
-        tok = strtok(NULL, " \t");
-    }
+/* libvmi's KVM/KVMI driver resolves a vm name to a running instance through
+ * libvirt (qemu:///system), not through the qemu process directly - there is
+ * no supported way to hand libvirt an externally-forked qemu process after
+ * the fact (virDomainQemuAttach was removed from the qemu driver). so qemu
+ * has to be launched *by* libvirt, as a transient domain built from cfg. */
+
+#define XML_MAX 8192
+
+static void xml_append(char *xml, size_t *len, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    *len += (size_t) vsnprintf(xml + *len, XML_MAX - *len, fmt, ap);
+    va_end(ap);
 }
 
-static int build_argv(const vm_config_t *cfg, const char *qmp_socket, const char *monitor_socket,
-                       const char *kvmi_socket, char *argv[], int max_args) {
-    static char mem_arg[32];
-    static char smp_arg[32];
-    static char drive_arg[PATH_MAX + 32];
-    static char qmp_arg[PATH_MAX + 32];
-    static char mon_arg[PATH_MAX + 32];
-    static char kvmi_arg[PATH_MAX + 32];
-    static char extra_buf[512];
+/* qemu.conf paths (qmp/monitor/kvmi sockets, the log file) come from the
+ * vm module's store dir, which is relative to rv's cwd on purpose. libvirtd
+ * runs elsewhere, so anything handed to it has to be absolute. */
+static void to_abs_path(const char *in, char *out, size_t out_len) {
+    if (!in[0] || in[0] == '/') {
+        snprintf(out, out_len, "%s", in);
+        return;
+    }
+    char cwd[PATH_MAX - 1];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        snprintf(out, out_len, "%s", in);
+        return;
+    }
+    snprintf(out, out_len, "%s/%s", cwd, in);
+}
 
-    int argc = 0;
-    argv[argc++] = "qemu-system-x86_64";
-    argv[argc++] = "-name";
-    argv[argc++] = (char *) cfg->name;
+static void build_domain_xml(const vm_config_t *cfg, const char *qmp_abs, const char *mon_abs,
+                              const char *kvmi_abs, char *xml, size_t xml_size) {
+    size_t len = 0;
+    (void) xml_size;
 
-    snprintf(mem_arg, sizeof(mem_arg), "%d", cfg->memory_mb);
-    argv[argc++] = "-m";
-    argv[argc++] = mem_arg;
+    xml_append(xml, &len, "<domain type='%s' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>\n",
+               cfg->use_kvm ? "kvm" : "qemu");
+    xml_append(xml, &len, "  <name>%s</name>\n", cfg->name);
+    xml_append(xml, &len, "  <memory unit='MiB'>%d</memory>\n", cfg->memory_mb);
+    xml_append(xml, &len, "  <currentMemory unit='MiB'>%d</currentMemory>\n", cfg->memory_mb);
+    xml_append(xml, &len, "  <vcpu placement='static'>%d</vcpu>\n", cfg->cpus);
+    xml_append(xml, &len, "  <os><type arch='x86_64' machine='pc-i440fx-4.2'>hvm</type><boot dev='hd'/></os>\n");
+    xml_append(xml, &len, "  <features><acpi/><apic/></features>\n");
+    xml_append(xml, &len, "  <cpu mode='host-passthrough' check='none' migratable='on'/>\n");
+    xml_append(xml, &len,
+               "  <on_poweroff>destroy</on_poweroff><on_reboot>restart</on_reboot><on_crash>destroy</on_crash>\n");
 
-    snprintf(smp_arg, sizeof(smp_arg), "%d", cfg->cpus);
-    argv[argc++] = "-smp";
-    argv[argc++] = smp_arg;
+    /* disk/socket paths live under the invoking user's home dir, which the
+     * dynamically-allocated per-domain uid libvirt would otherwise pick
+     * can't even traverse (mode 750). run as that same uid/gid instead of
+     * relabeling, and skip apparmor - its auto-generated profile only
+     * covers <disk>/<source> paths, not the commandline-passthrough
+     * qmp/monitor/kvmi sockets below. */
+    xml_append(xml, &len, "  <seclabel type='static' model='dac' relabel='no'><label>%d:%d</label></seclabel>\n",
+               getuid(), getgid());
+    xml_append(xml, &len, "  <seclabel type='none' model='apparmor'/>\n");
 
-    if (cfg->use_kvm) argv[argc++] = "-enable-kvm";
+    xml_append(xml, &len, "  <devices>\n");
+    xml_append(xml, &len, "    <emulator>/usr/local/bin/qemu-system-x86_64</emulator>\n");
 
     if (cfg->disk_image[0]) {
-        snprintf(drive_arg, sizeof(drive_arg), "file=%s,if=virtio", cfg->disk_image);
-        argv[argc++] = "-drive";
-        argv[argc++] = drive_arg;
+        xml_append(xml, &len,
+                   "    <disk type='file' device='disk'>\n"
+                   "      <driver name='qemu' type='qcow2'/>\n"
+                   "      <source file='%s'/>\n"
+                   "      <target dev='vda' bus='virtio'/>\n"
+                   "    </disk>\n",
+                   cfg->disk_image);
     }
 
     if (cfg->cdrom[0]) {
-        argv[argc++] = "-cdrom";
-        argv[argc++] = (char *) cfg->cdrom;
+        xml_append(xml, &len,
+                   "    <disk type='file' device='cdrom'>\n"
+                   "      <driver name='qemu' type='raw'/>\n"
+                   "      <source file='%s'/>\n"
+                   "      <target dev='sda' bus='sata'/>\n"
+                   "      <readonly/>\n"
+                   "    </disk>\n",
+                   cfg->cdrom);
     }
 
     switch (cfg->network) {
-        case VM_NET_NONE:
-            argv[argc++] = "-nic";
-            argv[argc++] = "none";
+        case VM_NET_USER:
+            xml_append(xml, &len, "    <interface type='user'><model type='virtio-net-pci'/></interface>\n");
             break;
         case VM_NET_TAP:
-            argv[argc++] = "-nic";
-            argv[argc++] = "tap,model=virtio-net-pci";
+            xml_append(
+                xml, &len,
+                "    <interface type='network'><source network='default'/><model type='virtio-net-pci'/></interface>\n");
             break;
-        case VM_NET_USER:
+        case VM_NET_NONE:
         default:
-            argv[argc++] = "-nic";
-            argv[argc++] = "user,model=virtio-net-pci";
             break;
     }
 
-    argv[argc++] = "-display";
-    argv[argc++] = (char *) vm_display_mode_str(cfg->display);
-
-    snprintf(qmp_arg, sizeof(qmp_arg), "unix:%s,server,nowait", qmp_socket);
-    argv[argc++] = "-qmp";
-    argv[argc++] = qmp_arg;
-
-    snprintf(mon_arg, sizeof(mon_arg), "unix:%s,server,nowait", monitor_socket);
-    argv[argc++] = "-monitor";
-    argv[argc++] = mon_arg;
-
-    /* qemu connects out to the vmi module's listening socket, retrying
-     * until something's there to accept it - see vmi_attach(). */
-    if (kvmi_socket && kvmi_socket[0]) {
-        snprintf(kvmi_arg, sizeof(kvmi_arg), "socket,path=%s,id=kvmi_chardev,reconnect-ms=10000", kvmi_socket);
-        argv[argc++] = "-chardev";
-        argv[argc++] = kvmi_arg;
-        argv[argc++] = "-object";
-        argv[argc++] = "introspection,id=kvmi,chardev=kvmi_chardev";
+    if (cfg->display == VM_DISPLAY_VNC || cfg->display == VM_DISPLAY_GTK) {
+        xml_append(xml, &len, "    <graphics type='vnc' port='-1' autoport='yes' listen='127.0.0.1'/>\n");
     }
 
-    snprintf(extra_buf, sizeof(extra_buf), "%s", cfg->extra_args);
-    split_extra_args(extra_buf, argv, &argc, max_args);
+    xml_append(xml, &len, "  </devices>\n");
 
-    argv[argc] = NULL;
-    return argc;
+    /* qmp/monitor go through commandline passthrough (rather than libvirt's
+     * own channels) so vm_console() can keep talking to a plain qemu HMP
+     * socket exactly like it did when rv forked qemu itself. */
+    xml_append(xml, &len, "  <qemu:commandline>\n");
+    xml_append(xml, &len, "    <qemu:arg value='-qmp'/>\n    <qemu:arg value='unix:%s,server,nowait'/>\n", qmp_abs);
+    xml_append(xml, &len, "    <qemu:arg value='-monitor'/>\n    <qemu:arg value='unix:%s,server,nowait'/>\n",
+               mon_abs);
+
+    if (kvmi_abs && kvmi_abs[0]) {
+        xml_append(xml, &len,
+                   "    <qemu:arg value='-chardev'/>\n"
+                   "    <qemu:arg value='socket,path=%s,id=kvmi_chardev,reconnect=10'/>\n"
+                   "    <qemu:arg value='-object'/>\n"
+                   "    <qemu:arg value='introspection,id=kvmi,chardev=kvmi_chardev'/>\n",
+                   kvmi_abs);
+    }
+
+    if (cfg->extra_args[0]) {
+        char buf[512];
+        snprintf(buf, sizeof(buf), "%s", cfg->extra_args);
+        char *tok = strtok(buf, " \t");
+        while (tok) {
+            xml_append(xml, &len, "    <qemu:arg value='%s'/>\n", tok);
+            tok = strtok(NULL, " \t");
+        }
+    }
+
+    xml_append(xml, &len, "  </qemu:commandline>\n");
+    xml_append(xml, &len, "</domain>\n");
+}
+
+static int read_pidfile(const char *name, pid_t *out_pid) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "/run/libvirt/qemu/%s.pid", name);
+
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    int rc = fscanf(f, "%d", out_pid) == 1 ? 0 : -1;
+    fclose(f);
+    return rc;
+}
+
+static void write_log(const char *log_path, const char *fmt, ...) {
+    FILE *f = fopen(log_path, "w");
+    if (!f) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fclose(f);
 }
 
 int qemu_spawn(const vm_config_t *cfg, const char *qmp_socket, const char *monitor_socket,
                const char *kvmi_socket, const char *log_path, pid_t *out_pid) {
-    char *argv[64];
-    build_argv(cfg, qmp_socket, monitor_socket, kvmi_socket, argv, 64);
+    char qmp_abs[PATH_MAX], mon_abs[PATH_MAX], kvmi_abs[PATH_MAX];
+    to_abs_path(qmp_socket, qmp_abs, sizeof(qmp_abs));
+    to_abs_path(monitor_socket, mon_abs, sizeof(mon_abs));
+    to_abs_path(kvmi_socket, kvmi_abs, sizeof(kvmi_abs));
 
-    pid_t pid = fork();
-    if (pid < 0) return -1;
+    char xml[XML_MAX];
+    build_domain_xml(cfg, qmp_abs, mon_abs, kvmi_abs, xml, sizeof(xml));
 
-    if (pid == 0) {
-        setsid();
-        int fd = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd >= 0) {
-            dup2(fd, STDOUT_FILENO);
-            dup2(fd, STDERR_FILENO);
-            close(fd);
-        }
-        int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDIN_FILENO);
-            close(devnull);
-        }
-        execvp("qemu-system-x86_64", argv);
-        _exit(127);
+    virConnectPtr conn = virConnectOpen("qemu:///system");
+    if (!conn) {
+        write_log(log_path, "failed to connect to qemu:///system\n");
+        return -1;
     }
 
-    /* give qemu a moment to fail fast on bad args before we report success */
-    usleep(200000);
-    int status;
-    if (waitpid(pid, &status, WNOHANG) == pid) return -1;
+    virDomainPtr dom = virDomainCreateXML(conn, xml, 0);
+    if (!dom) {
+        virErrorPtr err = virGetLastError();
+        write_log(log_path, "virDomainCreateXML failed: %s\n", err ? err->message : "unknown error");
+        virConnectClose(conn);
+        return -1;
+    }
 
+    /* libvirt writes the pidfile just after fork, slightly before the
+     * domain is fully "running" - a few retries covers the gap. */
+    pid_t pid = -1;
+    for (int i = 0; i < 20 && pid <= 0; i++) {
+        if (read_pidfile(cfg->name, &pid) == 0) break;
+        usleep(100000);
+    }
+
+    virDomainFree(dom);
+    virConnectClose(conn);
+
+    if (pid <= 0) {
+        write_log(log_path, "started via libvirt but never found its pidfile\n");
+        return -1;
+    }
+
+    write_log(log_path, "launched via libvirt (qemu:///system), pid %d\nfull qemu log: /var/log/libvirt/qemu/%s.log\n",
+              pid, cfg->name);
     *out_pid = pid;
     return 0;
 }
