@@ -25,4 +25,15 @@ int vmi_write_virt(vmi_session_t *session, uint64_t vaddr, const void *buf, size
 int vmi_pause(vmi_session_t *session, char *err, size_t err_len);
 int vmi_resume(vmi_session_t *session, char *err, size_t err_len);
 
+/* single vcpu register, by reg_t - see vmi_reg_lookup() in vmi_reg_names.h
+ * for going from a name (including the control/debug/MSR set) to a reg_t.
+ * vmi_write_reg needs the vm paused first: the KVMI backend refuses to set
+ * a running vcpu's registers. */
+int vmi_read_reg(vmi_session_t *session, reg_t reg, uint64_t *value, char *err, size_t err_len);
+int vmi_write_reg(vmi_session_t *session, reg_t reg, uint64_t value, char *err, size_t err_len);
+
+/* full register snapshot in one call - cheaper than vmi_read_reg per field
+ * when dumping most of the set at once. */
+int vmi_read_regs(vmi_session_t *session, x86_registers_t *regs, char *err, size_t err_len);
+
 #endif

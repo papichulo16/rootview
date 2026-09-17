@@ -7,8 +7,10 @@
 #include <string.h>
 
 #include "vmi/vmi.h"
+#include "vmi/vmi_reg_names.h"
 
 #define DUMP_MAX 4096
+#define REG_NAME_MAX 32
 
 static void print_help(void) {
     printf("commands:\n"
@@ -18,6 +20,9 @@ static void print_help(void) {
            "  wp <paddr hex> <hex bytes>  write physical memory\n"
            "  rv <vaddr hex> <len>        read virtual memory (walks the current CR3)\n"
            "  wv <vaddr hex> <hex bytes>  write virtual memory (walks the current CR3)\n"
+           "  reg <name>                  read a vcpu register (gp, control, debug, MSR, ...)\n"
+           "  setreg <name> <value hex>   write a vcpu register - pause the vm first\n"
+           "  regs                        dump the common registers\n"
            "  help                        show this message\n"
            "  quit | exit                 detach and leave the shell\n");
 }
@@ -130,6 +135,71 @@ static void cmd_write_virt(vmi_session_t *session, const char *args) {
     printf("wrote %zu bytes to 0x%" PRIx64 "\n", len, vaddr);
 }
 
+static void cmd_read_reg(vmi_session_t *session, const char *args) {
+    char name[REG_NAME_MAX];
+    if (sscanf(args, "%31s", name) != 1) {
+        printf("usage: reg <name>\n");
+        return;
+    }
+
+    reg_t reg;
+    if (vmi_reg_lookup(name, &reg) != 0) {
+        printf("unknown register '%s'\n", name);
+        return;
+    }
+
+    uint64_t value;
+    char err[256];
+    if (vmi_read_reg(session, reg, &value, err, sizeof(err)) != 0) {
+        printf("error: %s\n", err);
+        return;
+    }
+    printf("%s = 0x%016" PRIx64 "\n", name, value);
+}
+
+static void cmd_write_reg(vmi_session_t *session, const char *args) {
+    char name[REG_NAME_MAX];
+    uint64_t value;
+    if (sscanf(args, "%31s %" SCNx64, name, &value) != 2) {
+        printf("usage: setreg <name> <value hex>\n");
+        return;
+    }
+
+    reg_t reg;
+    if (vmi_reg_lookup(name, &reg) != 0) {
+        printf("unknown register '%s'\n", name);
+        return;
+    }
+
+    char err[256];
+    if (vmi_write_reg(session, reg, value, err, sizeof(err)) != 0) {
+        printf("error: %s\n", err);
+        return;
+    }
+    printf("%s = 0x%016" PRIx64 "\n", name, value);
+}
+
+static void cmd_dump_regs(vmi_session_t *session) {
+    x86_registers_t regs;
+    char err[256];
+    if (vmi_read_regs(session, &regs, err, sizeof(err)) != 0) {
+        printf("error: %s\n", err);
+        return;
+    }
+
+    printf("rip=0x%016" PRIx64 " rsp=0x%016" PRIx64 " rflags=0x%016" PRIx64 "\n",
+           regs.rip, regs.rsp, regs.rflags);
+    printf("cr0=0x%016" PRIx64 " cr3=0x%016" PRIx64 " cr4=0x%016" PRIx64 "\n",
+           regs.cr0, regs.cr3, regs.cr4);
+    printf("dr6=0x%016" PRIx64 " dr7=0x%016" PRIx64 "\n", regs.dr6, regs.dr7);
+    printf("idtr_base=0x%016" PRIx64 " idtr_limit=0x%04" PRIx64 "  "
+           "gdtr_base=0x%016" PRIx64 " gdtr_limit=0x%04" PRIx64 "\n",
+           regs.idtr_base, regs.idtr_limit, regs.gdtr_base, regs.gdtr_limit);
+    printf("msr_efer=0x%016" PRIx64 " msr_star=0x%016" PRIx64 " "
+           "msr_lstar=0x%016" PRIx64 " msr_cstar=0x%016" PRIx64 "\n",
+           regs.msr_efer, regs.msr_star, regs.msr_lstar, regs.msr_cstar);
+}
+
 static void cmd_pause(vmi_session_t *session) {
     char err[256];
     if (vmi_pause(session, err, sizeof(err)) != 0) printf("error: %s\n", err);
@@ -153,6 +223,9 @@ static bool dispatch(vmi_session_t *session, char *line) {
     else if (strcmp(cmd, "wp") == 0) cmd_write_phys(session, args);
     else if (strcmp(cmd, "rv") == 0) cmd_read_virt(session, args);
     else if (strcmp(cmd, "wv") == 0) cmd_write_virt(session, args);
+    else if (strcmp(cmd, "reg") == 0) cmd_read_reg(session, args);
+    else if (strcmp(cmd, "setreg") == 0) cmd_write_reg(session, args);
+    else if (strcmp(cmd, "regs") == 0) cmd_dump_regs(session);
     else if (strcmp(cmd, "pause") == 0) cmd_pause(session);
     else if (strcmp(cmd, "resume") == 0) cmd_resume(session);
     else if (strcmp(cmd, "help") == 0) print_help();

@@ -1,5 +1,6 @@
 #include "vmi/vmi.h"
 
+#include <inttypes.h>
 #include <libvmi/libvmi.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -185,5 +186,43 @@ int vmi_resume(vmi_session_t *session, char *err, size_t err_len) {
         if (err) snprintf(err, err_len, "resume failed");
         return -1;
     }
+    return 0;
+}
+
+int vmi_read_reg(vmi_session_t *session, reg_t reg, uint64_t *value, char *err, size_t err_len) {
+    if (!session->attached) {
+        if (err) snprintf(err, err_len, "session not attached");
+        return -1;
+    }
+    if (vmi_get_vcpureg(session->vmi, value, reg, 0) != VMI_SUCCESS) {
+        if (err) snprintf(err, err_len, "failed to read register %" PRIu64, (uint64_t) reg);
+        return -1;
+    }
+    return 0;
+}
+
+int vmi_write_reg(vmi_session_t *session, reg_t reg, uint64_t value, char *err, size_t err_len) {
+    if (!session->attached) {
+        if (err) snprintf(err, err_len, "session not attached");
+        return -1;
+    }
+    if (vmi_set_vcpureg(session->vmi, value, reg, 0) != VMI_SUCCESS) {
+        if (err) snprintf(err, err_len, "failed to write register %" PRIu64, (uint64_t) reg);
+        return -1;
+    }
+    return 0;
+}
+
+int vmi_read_regs(vmi_session_t *session, x86_registers_t *regs, char *err, size_t err_len) {
+    if (!session->attached) {
+        if (err) snprintf(err, err_len, "session not attached");
+        return -1;
+    }
+    registers_t full;
+    if (vmi_get_vcpuregs(session->vmi, &full, 0) != VMI_SUCCESS) {
+        if (err) snprintf(err, err_len, "failed to read register set");
+        return -1;
+    }
+    *regs = full.x86;
     return 0;
 }
