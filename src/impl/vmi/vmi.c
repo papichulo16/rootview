@@ -42,7 +42,8 @@ int vmi_attach(const char *vm_name, vmi_session_t *session, char *err, size_t er
     init_data->entry[0].data = st.kvmi_socket;
 
     vmi_init_error_t init_err = VMI_INIT_ERROR_NONE;
-    status_t status = vmi_init(&session->vmi, VMI_KVM, vm_name, VMI_INIT_DOMAINNAME, init_data, &init_err);
+    status_t status = vmi_init(&session->vmi, VMI_KVM, vm_name, VMI_INIT_DOMAINNAME | VMI_INIT_EVENTS, init_data,
+                                &init_err);
     if (status != VMI_SUCCESS) {
         if (err) snprintf(err, err_len, "libvmi init failed for '%s' (init_error %d)", vm_name, (int) init_err);
         goto out;
