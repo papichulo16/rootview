@@ -24,12 +24,12 @@ RUN cd kvm-vmi/libkvmi \
  && make -j"$(nproc)" && make install && ldconfig
 
 RUN cd kvm-vmi/libvmi && mkdir build && cd build && \
-    cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DENABLE_XEN=OFF -DBUILD_EXAMPLES=OFF -DENABLE_STATIC=ON .. && \
+    cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DENABLE_XEN=OFF -DBUILD_EXAMPLES=OFF .. && \
     make -j$(nproc) && make install && ldconfig
 
 # make install's pkgconfig file doesn't always land somewhere pkg-config
 # looks by default - the Makefile needs `pkg-config --cflags/--libs libvmi`
-# to work both for headers and for the static-link deps.
+# to work for headers and dynamic linking.
 ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/share/pkgconfig
 
 VOLUME /root/env
