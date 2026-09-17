@@ -48,3 +48,7 @@ int vmi_reg_lookup(const char *name, reg_t *out) {
     }
     return -1;
 }
+
+bool vmi_reg_write_supported(reg_t reg) {
+    return reg <= R15; /* RAX..R15, RIP, RFLAGS are the contiguous 0..R15 range */
+}

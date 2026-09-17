@@ -28,7 +28,12 @@ int vmi_resume(vmi_session_t *session, char *err, size_t err_len);
 /* single vcpu register, by reg_t - see vmi_reg_lookup() in vmi_reg_names.h
  * for going from a name (including the control/debug/MSR set) to a reg_t.
  * vmi_write_reg needs the vm paused first: the KVMI backend refuses to set
- * a running vcpu's registers. */
+ * a running vcpu's registers. it can also only ever write the
+ * general-purpose set - see vmi_reg_write_supported() - since this kvmi
+ * build's wire protocol has no command for writing CR/DR/MSR registers.
+ * the new value is staged kernel-side and only actually lands on the vcpu
+ * when the pending pause is replied to, i.e. on the next vmi_resume() - a
+ * vmi_read_reg() while still paused will keep reporting the old value. */
 int vmi_read_reg(vmi_session_t *session, reg_t reg, uint64_t *value, char *err, size_t err_len);
 int vmi_write_reg(vmi_session_t *session, reg_t reg, uint64_t value, char *err, size_t err_len);
 

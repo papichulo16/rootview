@@ -21,7 +21,11 @@ static void print_help(void) {
            "  rv <vaddr hex> <len>        read virtual memory (walks the current CR3)\n"
            "  wv <vaddr hex> <hex bytes>  write virtual memory (walks the current CR3)\n"
            "  reg <name>                  read a vcpu register (gp, control, debug, MSR, ...)\n"
-           "  setreg <name> <value hex>   write a vcpu register - pause the vm first\n"
+           "  setreg <name> <value hex>   write a gp register (rax..r15, rip, rflags) -\n"
+           "                              pause the vm first; this kvmi build has no wire\n"
+           "                              command to write CR/DR/MSR registers. the write\n"
+           "                              only lands on 'resume', 'reg' keeps showing the\n"
+           "                              old value until then\n"
            "  regs                        dump the common registers\n"
            "  help                        show this message\n"
            "  quit | exit                 detach and leave the shell\n");
@@ -168,6 +172,11 @@ static void cmd_write_reg(vmi_session_t *session, const char *args) {
     reg_t reg;
     if (vmi_reg_lookup(name, &reg) != 0) {
         printf("unknown register '%s'\n", name);
+        return;
+    }
+    if (!vmi_reg_write_supported(reg)) {
+        printf("'%s' can't be written: this kvmi build only supports writing "
+               "general-purpose registers (rax..r15, rip, rflags)\n", name);
         return;
     }
 
