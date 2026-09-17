@@ -17,10 +17,8 @@ typedef enum {
     HOOK_KIND_BREAKPOINT, /* 0xcc planted at a virtual address */
 } hook_kind_t;
 
-/* what a fired hook reports to its callback. vaddr is the trapped address
- * for HOOK_KIND_BREAKPOINT and unused (0) for HOOK_KIND_REGISTER;
- * old/new_value are the register's value across the write for
- * HOOK_KIND_REGISTER and unused (0) for HOOK_KIND_BREAKPOINT. */
+/* vaddr is set for HOOK_KIND_BREAKPOINT only; old/new_value for
+ * HOOK_KIND_REGISTER only. */
 typedef struct {
     hook_kind_t kind;
     const char *name;
@@ -37,24 +35,18 @@ typedef struct hook {
     char name[HOOK_NAME_MAX];
     hook_kind_t kind;
 
-    vmi_event_t vmi_event; /* HOOK_KIND_REGISTER: this hook's own registration */
+    vmi_event_t vmi_event; /* HOOK_KIND_REGISTER only */
 
     reg_t reg;         /* HOOK_KIND_REGISTER */
     uint64_t vaddr;     /* HOOK_KIND_BREAKPOINT */
-    uint8_t orig_byte;  /* HOOK_KIND_BREAKPOINT: byte the planted 0xcc replaced */
+    uint8_t orig_byte;  /* HOOK_KIND_BREAKPOINT: byte the 0xcc replaced */
 
     hook_callback_t callback;
     void *user_data;
 } hook_t;
 
-/* bound to one attached vmi_session_t for its whole lifetime - see
- * hook_manager_init(). the KVMI backend only allows a single INT3 trap
- * registration at a time, so every breakpoint hook shares the manager's one
- * bp_event/ss_event pair; register hooks (keyed by CR0/CR3/CR4/msr_all) each
- * own their registration independently. mgr must stay at a fixed address
- * for as long as any hook is registered - libvmi keeps a pointer to each
- * hook's embedded vmi_event, and moving/copying mgr would leave those
- * dangling. */
+/* mgr must stay at a fixed address while any hook is active - libvmi keeps
+ * a pointer into each hook's embedded vmi_event. */
 typedef struct {
     vmi_session_t *session;
     hook_t hooks[HOOK_MAX];
@@ -63,7 +55,7 @@ typedef struct {
     bool bp_active;
     vmi_event_t bp_event;
     vmi_event_t ss_event;
-    hook_t *pending_bp; /* breakpoint hook currently mid-recoil, if any */
+    hook_t *pending_bp; /* hook mid-recoil, if any */
 } hook_manager_t;
 
 #endif
