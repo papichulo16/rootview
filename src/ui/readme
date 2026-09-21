@@ -1,6 +1,22 @@
-dynamic/ is the web half of RootView: the dashboard and introspection GUI that
-runs on the KVM host alongside the tool. See dynamic/README.md to run it.
+QUICK START
+-----------
+    git clone https://github.com/papichulo16/rootview.git
+    cd rootview/src/ui/dynamic
+    git checkout 2-webserver
+    ./run.sh
 
-The public course page -- the one we present, with the deliverables index --
-is a separate static site in its own repository, published with GitHub Pages.
-It is not built from here.
+Then open http://127.0.0.1:8000  — Ctrl-C to stop.
+
+
+run.sh
+-------------------------
+Runs three commands 
+
+    python3 -m venv .venv                     (only if .venv is missing)
+    .venv/bin/pip install -e ".[dev]"         (only if pyproject.toml changed)
+    .venv/bin/rootview-web                    (every time)
+
+
+    ./run.sh --reload              auto-restart when you save a .py file
+    ROOTVIEW_PORT=8080 ./run.sh    different port (8000 already in use?)
+    .venv/bin/python -m pytest
