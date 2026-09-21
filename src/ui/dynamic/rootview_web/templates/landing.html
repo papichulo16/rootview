@@ -90,6 +90,134 @@
   {% endif %}
 </section>
 
+{# ---------- how it fits together ----------
+   Two diagrams, sitting directly under the summary because they answer the
+   question the summary raises: "outside the guest" means where, exactly.
+
+   The labels and descriptions come from ARCHITECTURE in deliverables.py; the
+   shapes below carry the matching data-key. There is no JavaScript here, and
+   deliberately so -- the published static page ships none -- so hovering or
+   tab-focusing a shape reveals its description through CSS alone, and narrow
+   screens simply list every description under the diagram. #}
+<section class="section">
+  <h2 class="section-title">How it fits together</h2>
+
+  {# --- diagram 1: where a guest runs --- #}
+  {% set stack = architecture.stack %}
+  <div class="arch">
+    <div class="arch-intro">
+      <h3>{{ stack.title }}</h3>
+      <p>{{ stack.summary }}</p>
+    </div>
+
+    <div class="arch-figure">
+      <p class="arch-hint">Point at a layer, or tab to it, to read what it does</p>
+      <svg viewBox="0 0 600 320" role="group" aria-label="The KVM virtualization stack, from hardware up to the guest VMs">
+        <g class="arch-shape" data-key="vms" tabindex="0" role="img"
+           aria-label="{{ stack.layers.vms.label }}: {{ stack.layers.vms.desc }}">
+          <title>{{ stack.layers.vms.label }}</title>
+          <rect x="130" y="70" width="100" height="70" rx="6" fill="var(--arch-vm)"/>
+          <rect x="250" y="70" width="100" height="70" rx="6" fill="var(--arch-vm)"/>
+          <rect x="370" y="70" width="100" height="70" rx="6" fill="var(--arch-vm)"/>
+          <text x="180" y="105">VM</text>
+          <text x="300" y="105">VM</text>
+          <text x="420" y="105">VM</text>
+        </g>
+
+        <g class="arch-shape" data-key="kvm" tabindex="0" role="img"
+           aria-label="{{ stack.layers.kvm.label }}: {{ stack.layers.kvm.desc }}">
+          <title>{{ stack.layers.kvm.label }}</title>
+          <rect x="110" y="160" width="380" height="80" rx="6" fill="var(--arch-core)"/>
+          <text class="on-mid" x="300" y="200">{{ stack.layers.kvm.label }}</text>
+        </g>
+
+        <g class="arch-shape" data-key="hardware" tabindex="0" role="img"
+           aria-label="{{ stack.layers.hardware.label }}: {{ stack.layers.hardware.desc }}">
+          <title>{{ stack.layers.hardware.label }}</title>
+          <rect x="60" y="250" width="480" height="60" rx="6" fill="var(--arch-hw)"/>
+          <text x="300" y="280">{{ stack.layers.hardware.label }}</text>
+        </g>
+      </svg>
+    </div>
+
+    <div class="arch-panel">
+      <p class="arch-panel-eyebrow">Layer detail</p>
+      <p class="arch-panel-empty">Nothing selected.</p>
+      {% for key, layer in stack.layers.items() %}
+      <article class="arch-detail" data-key="{{ key }}">
+        <h4>{{ layer.label }}</h4>
+        <p>{{ layer.desc }}</p>
+      </article>
+      {% endfor %}
+    </div>
+  </div>
+
+  {# --- diagram 2: what RootView itself is made of --- #}
+  {% set engine = architecture.engine %}
+  <div class="arch">
+    <div class="arch-intro">
+      <h3>{{ engine.title }}</h3>
+      <p>{{ engine.summary }}</p>
+    </div>
+
+    <div class="arch-figure">
+      <p class="arch-hint">Point at a ring, or tab to it, to read what it does</p>
+      <svg viewBox="0 0 790 610" role="group"
+           aria-label="RootView's layers as concentric rings, from the guest VM at the centre out to the engine, with the web server alongside">
+
+        {% for key, r, label_y, tone in [
+             ('engine', 260, 66, 'on-light'),
+             ('api', 208, 118, 'on-light'),
+             ('rootview', 156, 170, 'on-mid'),
+             ('vmi', 104, 222, ''),
+             ('vm', 52, 300, '')] %}
+        <g class="arch-shape" data-key="{{ key }}" tabindex="0" role="img"
+           aria-label="{{ engine.layers[key].label }}: {{ engine.layers[key].desc }}">
+          <title>{{ engine.layers[key].label }}</title>
+          <circle cx="300" cy="300" r="{{ r }}" fill="var(--arch-{{ key }})"/>
+          <text{% if tone %} class="{{ tone }}"{% endif %} x="300" y="{{ label_y }}">{{ engine.layers[key].label }}</text>
+        </g>
+        {% endfor %}
+
+        {# A slow radar sweep across the rings: the engine watches the guest
+           continuously rather than at one moment. Drawn last so it passes over
+           the rings instead of under them, and switched off for anyone who
+           asked for reduced motion. #}
+        <g class="arch-sweep" aria-hidden="true">
+          <path d="M300,300 L300,40 A260,260 0 0 1 409.9,64.4 Z" fill="var(--arch-sweep)"/>
+        </g>
+
+        {# The engine feeds the web server, and the web server asks it for more:
+           an arrowhead at each end rather than a one-way pipe. #}
+        <g class="arch-link" aria-hidden="true">
+          <path d="M 499,133 C 570,95 620,110 660,150"/>
+          <polygon points="497,120 512,132 497,144"/>
+          <polygon points="662,138 648,150 662,162"/>
+        </g>
+
+        <g class="arch-shape arch-node" data-key="web" tabindex="0" role="img"
+           aria-label="{{ engine.layers.web.label }}: {{ engine.layers.web.desc }}">
+          <title>{{ engine.layers.web.label }}</title>
+          <rect x="660" y="115" width="112" height="70" rx="8"/>
+          <text x="716" y="143">Web</text>
+          <text x="716" y="163">server</text>
+        </g>
+      </svg>
+    </div>
+
+    <div class="arch-panel">
+      <p class="arch-panel-eyebrow">Layer detail</p>
+      <p class="arch-panel-empty">Nothing selected.</p>
+      {% for key, layer in engine.layers.items() %}
+      <article class="arch-detail" data-key="{{ key }}">
+        <h4>{{ layer.label }}</h4>
+        <p>{{ layer.desc }}</p>
+      </article>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
 {# ---------- algorithms and tools ---------- #}
 <section class="section">
   <h2 class="section-title">Algorithms and tools</h2>

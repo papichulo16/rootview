@@ -240,3 +240,215 @@
   .deliverables th { padding-bottom: 2px; }
   .deliverables tr + tr td { border-top: none; }
 }
+
+/* ---------- architecture diagrams ---------- */
+
+/* Two diagrams under the summary: the KVM stack a guest runs on, and
+   RootView's own layers. Both are hand-written SVG in landing.html, and both
+   are interactive without a line of JavaScript -- the published static page
+   ships none. Hovering or tab-focusing a shape reveals its description in the
+   panel beside it, through the :has() rules further down. */
+
+.arch {
+  /* The layer ramp, darkest at the guest and brightening outward, matching the
+     idea the diagram is making: the VM is opaque, and every layer RootView
+     wraps around it sees a little more. */
+  --arch-vm: #1b232e;
+  --arch-vmi: #1e4b74;
+  --arch-rootview: #2f77c4;
+  --arch-api: #62a8ff;
+  --arch-engine: #a8ceff;
+
+  /* The stack diagram is not part of that ramp: hardware is the floor, and the
+     hypervisor gets the same blue as RootView's core because that is where
+     RootView attaches. */
+  --arch-hw: #2b3440;
+  --arch-core: #2f77c4;
+
+  --arch-sweep: rgba(76, 154, 255, 0.16);
+
+  display: grid;
+  grid-template-columns: minmax(0, 1.18fr) minmax(0, 0.82fr);
+  grid-template-areas:
+    "intro  intro"
+    "figure panel";
+  gap: 16px;
+  margin-top: 20px;
+}
+
+/* The second diagram is a separate idea, not a continuation of the first. */
+.arch + .arch {
+  margin-top: 32px;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+
+.arch-intro { grid-area: intro; }
+.arch-intro h3 { margin: 0 0 6px; font-size: 15.5px; }
+.arch-intro p {
+  margin: 0;
+  max-width: 72ch;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.arch-figure {
+  grid-area: figure;
+  /* Otherwise the box stretches to the height of the panel beside it and the
+     diagram floats in dead space. */
+  align-self: start;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px 16px;
+}
+
+.arch-hint {
+  margin: 0 0 8px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+}
+
+.arch svg { display: block; width: 100%; height: auto; overflow: visible; }
+
+/* ---------- the shapes ---------- */
+
+.arch-shape rect,
+.arch-shape circle {
+  stroke: var(--bg-raised);
+  stroke-width: 3;
+  transition: filter 0.15s ease, stroke 0.15s ease;
+}
+
+.arch-shape text {
+  font-family: var(--mono);
+  font-size: 15px;
+  fill: var(--text);
+  text-anchor: middle;
+  dominant-baseline: middle;
+  pointer-events: none;
+}
+/* Labels sitting on the two brightest rings need dark text to stay readable. */
+.arch-shape text.on-light { fill: #0d1117; }
+.arch-shape text.on-mid { fill: #f3f7ff; }
+
+.arch-shape:hover rect,
+.arch-shape:hover circle { filter: brightness(1.16); }
+
+/* The accent outline is the focus indicator, so the default one is dropped
+   rather than drawn on top of it. */
+.arch-shape:focus { outline: none; }
+.arch-shape:hover rect,
+.arch-shape:hover circle,
+.arch-shape:focus rect,
+.arch-shape:focus circle { stroke: var(--accent); }
+
+.arch-node rect { fill: var(--bg); stroke: var(--border); stroke-width: 1.5; }
+.arch-node text { font-size: 13px; }
+
+.arch-link path {
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 4;
+  opacity: 0.55;
+}
+.arch-link polygon { fill: var(--text-muted); opacity: 0.55; }
+
+.arch-sweep {
+  pointer-events: none;
+  transform-origin: 300px 300px;
+  animation: arch-sweep 9s linear infinite;
+}
+@keyframes arch-sweep {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .arch-sweep { animation: none; }
+}
+
+/* ---------- the detail panel ---------- */
+
+.arch-panel {
+  grid-area: panel;
+  align-self: start;
+  min-height: 200px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+
+.arch-panel-eyebrow {
+  margin: 0 0 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.arch-panel-empty { margin: 0; font-size: 13.5px; color: var(--text-muted); }
+
+.arch-detail { display: none; }
+.arch-detail h4 { margin: 0 0 8px; font-size: 15px; color: var(--accent); }
+.arch-detail p { margin: 0; font-size: 14px; line-height: 1.62; color: var(--text-muted); }
+
+/* One rule per shape, because a selector cannot pair a shape with its
+   description generically. Every data-key below appears once in landing.html;
+   adding a shape there means adding its line here. */
+.arch:has(.arch-shape:is(:hover, :focus)) .arch-panel-empty { display: none; }
+
+.arch:has([data-key="vms"]:is(:hover, :focus)) .arch-detail[data-key="vms"],
+.arch:has([data-key="kvm"]:is(:hover, :focus)) .arch-detail[data-key="kvm"],
+.arch:has([data-key="hardware"]:is(:hover, :focus)) .arch-detail[data-key="hardware"],
+.arch:has([data-key="vm"]:is(:hover, :focus)) .arch-detail[data-key="vm"],
+.arch:has([data-key="vmi"]:is(:hover, :focus)) .arch-detail[data-key="vmi"],
+.arch:has([data-key="rootview"]:is(:hover, :focus)) .arch-detail[data-key="rootview"],
+.arch:has([data-key="api"]:is(:hover, :focus)) .arch-detail[data-key="api"],
+.arch:has([data-key="engine"]:is(:hover, :focus)) .arch-detail[data-key="engine"],
+.arch:has([data-key="web"]:is(:hover, :focus)) .arch-detail[data-key="web"] { display: block; }
+
+/* ---------- when there is nothing to hover, or nothing to hover with ----------
+   A browser without :has() would show an empty panel forever, and a touch
+   screen has no hover at all. Both fall back to the same thing: every
+   description listed under the diagram, which is the content, just not the
+   interaction. */
+
+.arch-detail + .arch-detail {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+@supports not selector(:has(*)) {
+  .arch-hint { display: none; }
+  .arch-panel-empty { display: none; }
+  .arch-detail { display: block; }
+}
+
+/* A touch screen has no pointer to hover with, and on a phone the panel would
+   be a long way from the shape anyway. */
+@media (hover: none), (max-width: 620px) {
+  .arch-hint { display: none; }
+  .arch-panel-empty { display: none; }
+  .arch-detail { display: block; }
+}
+
+/* Below this the two columns are too narrow to read; the panel moves under the
+   diagram, where hovering still works on a pointer device. */
+@media (max-width: 860px) {
+  .arch {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "intro"
+      "figure"
+      "panel";
+  }
+  .arch-panel { min-height: 0; }
+}

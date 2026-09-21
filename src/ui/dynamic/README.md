@@ -10,6 +10,11 @@ interface says plainly that it is not reading any guest.
 
 ## Run it
 
+`./run.sh` executes the three commands below for you: it builds the virtualenv
+on the first run, then goes straight to serving on every run after that. Ctrl-C
+stops it, and `./run.sh --reload` restarts the server whenever you save a `.py`
+file.
+
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
@@ -32,6 +37,12 @@ cannot disagree. Rebuild the static page after editing it:
 .venv/bin/python tools/build_static_site.py
 ```
 
+You do not have to remember to. `.github/workflows/pages.yml` runs the same
+build on every push to `main` and publishes the result to
+<https://papichulo16.github.io/rootview/>, so editing `deliverables.py` is the
+only step needed to update the public page. Rebuilding locally is for seeing
+the change before you push.
+
 ## Publishing a course deliverable
 
 The landing page opens with the project identity and the deliverables index.
@@ -48,6 +59,19 @@ Each document starts with an empty `url` and renders as inert grey text marked
 
 It becomes a working link immediately. An external url (Google Doc, GitHub,
 anything) works just as well. Nothing outside that file needs to change.
+
+## Editing the architecture diagrams
+
+Under the summary the landing page carries two diagrams: the KVM stack a guest
+runs on, and RootView's own layers. Their wording — every label and every
+description — is `ARCHITECTURE` in `rootview_web/deliverables.py`. The shapes
+are hand-written SVG in `templates/landing.html`, matched to that wording by
+`data-key`, so renaming a key means renaming it in both places.
+
+They are interactive with no JavaScript: hovering or tab-focusing a shape
+reveals its description through the `:has()` rules in `static/css/landing.css`.
+That keeps the running app and the published static page, which ships no
+scripts at all, behaving identically.
 
 
 ## Pages

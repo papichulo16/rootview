@@ -2,23 +2,36 @@
 1. HOW I WAS RUNNING WEBSITE FOR TESTING
 ===============================================================================
 
-From the `web/` directory:
+From `src/ui/dynamic/` (this directory):
 
-    python3 -m venv .venv
-    .venv/bin/pip install -e ".[dev]"
-    .venv/bin/python -m rootview_web
+    ./run.sh
+
+That is the whole thing. It builds the virtualenv the first time, installs the
+dependencies and starts the server; Ctrl-C stops it. Every run after the first
+goes straight to serving unless pyproject.toml has changed.
 
 Open http://127.0.0.1:8000
 
 You will see the site with a banner saying no introspection backend is
 connected.
 
+run.sh is only running these for you, if you would rather do it by hand:
+
+    python3 -m venv .venv
+    .venv/bin/pip install -e ".[dev]"
+    .venv/bin/python -m rootview_web
+
 Run the tests too, so you know the baseline is green:
 
     .venv/bin/python -m pytest
 
-auto-reload:
-    .venv/bin/uvicorn rootview_web.app:app --reload
+auto-reload -- restarts the server whenever you save a .py file:
+
+    ./run.sh --reload
+
+Settings are environment variables, so they go in front of either form:
+
+    ROOTVIEW_PORT=8080 ./run.sh
 
 
 ===============================================================================
@@ -330,7 +343,7 @@ develop with the site running in front of you.
 The backend is selected by an environment variable. One line in
 `rootview_web/app.py` maps the name to your class; it is already written.
 
-    ROOTVIEW_BACKEND=libvmi .venv/bin/python -m rootview_web
+    ROOTVIEW_BACKEND=libvmi ./run.sh
 
 Other settings:
 
@@ -372,7 +385,8 @@ skipped when no guest is available, so the suite still runs on a laptop.
 9. Random Notes
 ===============================================================================
 
-  * Editing a .py file does nothing until the server restarts. Use --reload.
+  * Editing a .py file does nothing until the server restarts. Use
+    ./run.sh --reload.
 
   * Do not return an empty list to mean "nothing found" when you actually mean
     "not implemented" or "could not read". Raise instead. The difference is the
@@ -420,6 +434,7 @@ skipped when no guest is available, so the suite still runs on a laptop.
       test_api.py        endpoints and pages
       test_events.py     event bus and scanner loop
 
+    run.sh               builds the venv if needed, then starts the server
     README.md            project overview
     BACKEND_GUIDE.txt    this file
 

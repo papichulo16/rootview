@@ -1,4 +1,4 @@
-"""Build the standalone static project page into ../../site/.
+"""Build the standalone static project page into ../static/.
 
 The site published for the course is a plain HTML page with no server behind
 it: identity, deliverables, project summary, tools, challenges and milestones.
@@ -6,16 +6,16 @@ It is generated from the same ``rootview_web/deliverables.py`` that drives the
 running application, so publishing a document stays a one-line edit in one file
 instead of two that can drift apart.
 
-Run it from the ``web/`` directory:
+Run it from the ``dynamic/`` directory:
 
     .venv/bin/python tools/build_static_site.py
 
 Output (all of it safe to commit and serve from GitHub Pages):
 
-    site/index.html
-    site/static/css/*.css
-    site/static/docs/*        (whatever you dropped in rootview_web/static/docs)
-    site/.nojekyll
+    static/index.html
+    static/static/css/*.css
+    static/static/docs/*      (whatever you dropped in rootview_web/static/docs)
+    static/.nojekyll
 
 The generated HTML is ordinary readable markup with no framework, so it can
 also be hand-edited afterwards if you would rather not re-run the build. Just
@@ -28,14 +28,17 @@ import shutil
 import sys
 from pathlib import Path
 
-# Allow running as a plain script from the web/ directory.
+# Allow running as a plain script from the dynamic/ directory.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from rootview_web import deliverables  # noqa: E402
 from rootview_web.templating import STATIC_DIR, templates  # noqa: E402
 
 WEB_DIR = Path(__file__).resolve().parents[1]
-OUTPUT_DIR = WEB_DIR.parent / "site"
+
+#: The published page, ``src/ui/static/``. It sits beside this application
+#: rather than inside it: one is the tool, the other is the course page.
+OUTPUT_DIR = WEB_DIR.parent / "static"
 
 #: Subdirectories of the app's static/ that the standalone page needs. The
 #: JavaScript is deliberately excluded: the static page holds no event stream.
@@ -64,6 +67,7 @@ def render_page() -> str:
         semesters=deliverables.SEMESTERS,
         tools=deliverables.TOOLS,
         challenges=deliverables.CHALLENGES,
+        architecture=deliverables.ARCHITECTURE,
         # Present so the template's guards evaluate; none of it is rendered
         # while static_build is true.
         active="home",

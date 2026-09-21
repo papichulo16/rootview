@@ -12,12 +12,14 @@ import sys
 from pathlib import Path
 
 import pytest
+from markupsafe import escape
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import build_static_site  # noqa: E402
 
 from rootview_web import deliverables  # noqa: E402
+from rootview_web.templating import STATIC_DIR  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -76,6 +78,25 @@ def test_carries_tools_challenges_and_tasks(page):
         for row in semester["rows"]:
             for task in row.get("tasks", []):
                 assert task in page
+
+
+def test_carries_both_architecture_diagrams(page):
+    """The diagrams are content, not decoration, so the static page keeps them."""
+    for diagram in deliverables.ARCHITECTURE.values():
+        assert diagram["title"] in page
+        for key, layer in diagram["layers"].items():
+            # The shape in the svg and the description beside it are matched by
+            # key; a renamed key here leaves one of them stranded.
+            assert f'data-key="{key}"' in page
+            # Escaped the way the template writes it: the prose has
+            # apostrophes, and Jinja turns those into entities.
+            assert str(escape(layer["desc"])) in page
+
+
+def test_diagrams_need_no_javascript(page):
+    """The reveal is CSS-only, so it has to survive a page that ships no js."""
+    assert ":has(" in (STATIC_DIR / "css" / "landing.css").read_text()
+    assert "<script" not in page
 
 
 def test_published_documents_keep_their_link(page):

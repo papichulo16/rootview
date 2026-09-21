@@ -1,21 +1,23 @@
-"""All project content shown on the landing page.
+"""All project content shown on the page.
 
 Everything a teammate is likely to want to change lives here rather than in the
-templates: who is on the team, what the milestones contain, which tools the
+template: who is on the team, what the milestones contain, which tools the
 project uses, and where the course documents live.
 
 **Publishing a deliverable.** Every document below has a ``url`` that starts
 empty. An empty url renders as plain greyed-out text marked "not published yet";
-the moment you put a link in, it becomes a working hyperlink. Nothing else has
-to change::
+the moment you put a link in, it becomes a working hyperlink::
 
-    {"label": "Plan", "url": "/static/docs/plan.pdf"},
+    {"label": "Plan", "url": "https://docs.google.com/document/d/..."}  # external
+    {"label": "Plan", "url": "docs/plan.pdf"}                           # in this repo
 
-Any url works -- a path to a file dropped in ``rootview_web/static/docs/``, or a
-full link to a Google Doc, a PDF, or a GitHub file.
+For a file in this repo, drop it in ``docs/`` and use the relative path above.
+Leading slashes will not work on GitHub Pages, where the site is served from a
+subdirectory (``/<repo-name>/``).
 
-Note that this is a Python module, so the web server has to be restarted before
-an edit here shows up. Running with ``uvicorn ... --reload`` does that for you.
+After editing this file, rebuild the page and commit both::
+
+    python site/build.py
 """
 
 from __future__ import annotations
@@ -41,8 +43,8 @@ SEMESTERS = [
                 "milestone": "Plan",
                 "due": "Aug 31",
                 "documents": [
-                    {"label": "Plan", "url": "https://docs.google.com/document/d/1X2HVOF_cRx9IzFaK1CwSO_rhBEuO-SpnqIVeKuTrdmY/edit?usp=sharing"},
-                    {"label": "Presentation", "url": ""},
+                    {"label": "Plan", "url": "docs/senior_project_plan.pdf"},
+                    {"label": "Presentation", "url": "docs/RootView_Project_Plan.pptx"},
                 ],
             },
             {
@@ -144,3 +146,108 @@ CHALLENGES = [
         "rootkits, and what characteristics of malicious activity can be observed.",
     ),
 ]
+
+
+#: The two diagrams in the "How it fits together" section of the landing page.
+#:
+#: Only the words live here. The shapes themselves -- the stack's boxes and the
+#: engine's rings -- are drawn in ``site/templates/page.html`` and matched to the
+#: entries below by key, so renaming a key here without renaming it there
+#: leaves a shape with no description attached. Adding a layer means adding the
+#: shape too; editing a label or a description means editing only this file.
+ARCHITECTURE = {
+    "stack": {
+        "title": "The virtualization stack",
+        "summary": (
+            "Where a guest actually runs, from the hardware up through the "
+            "hypervisor to the VMs themselves. RootView adds no layer here. It "
+            "watches this stack from the host side."
+        ),
+        "layers": {
+            "vms": {
+                "label": "Guest VMs",
+                "desc": (
+                    "Independent virtual machines, each with its own guest "
+                    "kernel. This is the layer RootView exists to protect: it "
+                    "is where an eBPF rootkit runs, and where it hides."
+                ),
+            },
+            "kvm": {
+                "label": "Host OS + KVM",
+                "desc": (
+                    "The host's Linux kernel with the KVM module loaded, "
+                    "creating, scheduling and isolating the guests above it. "
+                    "RootView runs here, beside the hypervisor rather than "
+                    "inside anything it is watching."
+                ),
+            },
+            "hardware": {
+                "label": "Hardware",
+                "desc": (
+                    "The physical machine underneath everything: a CPU with "
+                    "virtualization extensions (VT-x or AMD-V), memory and "
+                    "storage."
+                ),
+            },
+        },
+    },
+    "engine": {
+        "title": "The detection engine",
+        "summary": (
+            "RootView's own layers, built outward from the guest. The colour "
+            "brightens with each ring: the VM at the centre is opaque, and "
+            "every layer around it adds a little more visibility into what is "
+            "happening inside."
+        ),
+        "layers": {
+            "vm": {
+                "label": "VM",
+                "desc": (
+                    "The guest being monitored. From inside, a rootkit can "
+                    "hide itself from the guest's own tools, so RootView "
+                    "treats nothing reported from in here as evidence."
+                ),
+            },
+            "vmi": {
+                "label": "VMI",
+                "desc": (
+                    "Virtual machine introspection, built on LibVMI. Reads the "
+                    "guest's memory directly from the host, so a compromised "
+                    "guest kernel cannot lie about its own state."
+                ),
+            },
+            "rootview": {
+                "label": "RootView",
+                "desc": (
+                    "The detection logic. Walks the guest memory that VMI "
+                    "hands it to enumerate eBPF programs and maps, and checks "
+                    "what it finds against known rootkit behaviour."
+                ),
+            },
+            "api": {
+                "label": "Python API",
+                "desc": (
+                    "A researcher-facing interface over the same introspection "
+                    "data, for building eBPF analysis and detection tooling "
+                    "beyond the checks that ship with the engine."
+                ),
+            },
+            "engine": {
+                "label": "Engine",
+                "desc": (
+                    "Ties the detection logic, VMI and the Python API together "
+                    "into one running service. This is the layer the web "
+                    "server talks to."
+                ),
+            },
+            "web": {
+                "label": "Web server",
+                "desc": (
+                    "The interface: a dashboard that answers whether anything "
+                    "is wrong, and an introspection view for reading the raw "
+                    "eBPF state the engine is working from."
+                ),
+            },
+        },
+    },
+}

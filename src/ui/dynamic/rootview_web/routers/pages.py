@@ -87,6 +87,7 @@ async def landing(
             "semesters": deliverables.SEMESTERS,
             "tools": deliverables.TOOLS,
             "challenges": deliverables.CHALLENGES,
+            "architecture": deliverables.ARCHITECTURE,
             "settings": settings,
             "active": "home",
             "live": False,
