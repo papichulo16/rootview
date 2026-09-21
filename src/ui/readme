@@ -1,3 +1,6 @@
-Dyanmic contains the website with the dashboard that can be used to connect to the tool iteself
+dynamic/ is the web half of RootView: the dashboard and introspection GUI that
+runs on the KVM host alongside the tool. See dynamic/README.md to run it.
 
-Static contains the website we can present to Chan that can be hosted with github pages
+The public course page -- the one we present, with the deliverables index --
+is a separate static site in its own repository, published with GitHub Pages.
+It is not built from here.

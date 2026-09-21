@@ -2,4 +2,3 @@ rv
 build/obj/
 
 .gdb_history
-src/ui/static

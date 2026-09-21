@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import pytest
+from markupsafe import escape
 
 from rootview_web import deliverables
 from rootview_web.app import build_backend
 from rootview_web.backends.libvmi import LibVMIBackend
 from rootview_web.config import Settings
+from rootview_web.templating import STATIC_DIR
 from tests.conftest import FakeBackend, client_with, compromised_snapshot
 
 
@@ -260,6 +262,33 @@ def test_documents_are_comma_separated_without_stray_spaces(unconfigured_client,
     assert "</span>, " in page  # unpublished item followed by a separator
     assert "</a> ," not in page
     assert "</span> ," not in page
+
+
+# --------------------------------------------------------------------------
+# the architecture diagrams
+# --------------------------------------------------------------------------
+
+
+def test_landing_carries_both_architecture_diagrams(unconfigured_client):
+    """The svg shapes and the prose beside them are matched by ``data-key``, so
+    a key renamed in one place leaves the other stranded with nothing to say."""
+    page = unconfigured_client.get("/").text
+    for diagram in deliverables.ARCHITECTURE.values():
+        assert diagram["title"] in page
+        for key, layer in diagram["layers"].items():
+            assert f'data-key="{key}"' in page
+            # Escaped the way the template writes it: the prose has
+            # apostrophes, and Jinja turns those into entities.
+            assert str(escape(layer["desc"])) in page
+
+
+def test_diagrams_reveal_without_javascript(unconfigured_client):
+    """The reveal is CSS-only. If that rule disappeared the shapes would still
+    render while silently explaining nothing, which no other test would catch."""
+    assert ":has(" in (STATIC_DIR / "css" / "landing.css").read_text()
+    page = unconfigured_client.get("/").text
+    assert "onmouseover" not in page
+    assert "onfocus" not in page
 
 
 # --------------------------------------------------------------------------

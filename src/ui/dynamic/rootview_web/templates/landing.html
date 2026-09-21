@@ -70,9 +70,6 @@
     kernel memory from outside the guest, on the KVM host, where the malware has no
     way to reach.
   </p>
-  {# Both of these describe a running server. The standalone project page has
-     none, so they are omitted there rather than linking nowhere. #}
-  {% if not static_build %}
   <div class="cta-row">
     <a class="btn primary" href="/dashboard">Open the dashboard</a>
     <a class="btn" href="/introspect">Inspect a guest</a>
@@ -87,7 +84,6 @@
       No running guests right now
     {% endif %}
   </p>
-  {% endif %}
 </section>
 
 {# ---------- how it fits together ----------
@@ -96,9 +92,9 @@
 
    The labels and descriptions come from ARCHITECTURE in deliverables.py; the
    shapes below carry the matching data-key. There is no JavaScript here, and
-   deliberately so -- the published static page ships none -- so hovering or
-   tab-focusing a shape reveals its description through CSS alone, and narrow
-   screens simply list every description under the diagram. #}
+   deliberately so: hovering or tab-focusing a shape reveals its description
+   through CSS alone, and narrow screens simply list every description under
+   the diagram. #}
 <section class="section">
   <h2 class="section-title">How it fits together</h2>
 

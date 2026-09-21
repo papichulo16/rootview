@@ -9,15 +9,12 @@ empty. An empty url renders as plain greyed-out text marked "not published yet";
 the moment you put a link in, it becomes a working hyperlink::
 
     {"label": "Plan", "url": "https://docs.google.com/document/d/..."}  # external
-    {"label": "Plan", "url": "docs/plan.pdf"}                           # in this repo
+    {"label": "Plan", "url": "/static/docs/plan.pdf"}                   # in this repo
 
-For a file in this repo, drop it in ``docs/`` and use the relative path above.
-Leading slashes will not work on GitHub Pages, where the site is served from a
-subdirectory (``/<repo-name>/``).
-
-After editing this file, rebuild the page and commit both::
-
-    python site/build.py
+For a file in this repo, drop it in ``rootview_web/static/docs/`` and link it
+with the absolute path above; the server mounts that directory at ``/static``.
+Nothing outside this file needs to change, and there is no build step -- the
+landing page reads it on every request.
 """
 
 from __future__ import annotations

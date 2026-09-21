@@ -23,25 +23,16 @@ python3 -m venv .venv
 
 Then open <http://127.0.0.1:8000>.
 
-## The two front ends
+## Where this runs
 
-| | What it is | Where it runs |
-| --- | --- | --- |
-| `dyanmic/` (this folder) | The application: dashboard, introspection view, JSON API | On the KVM host, next to the guest VMs |
-| `../static/` | A static project page: identity, deliverables, milestones | Anywhere. No server, publishable to GitHub Pages |
+On the KVM host, next to the guest VMs -- LibVMI reads a guest's memory from
+outside it, so the server has to sit on the host side of the hypervisor
+boundary. Running it inside the guest it is meant to be watching would put it
+in the untrusted zone this whole design exists to stay out of.
 
-Both read their project content from `rootview_web/deliverables.py`, so they
-cannot disagree. Rebuild the static page after editing it:
-
-```sh
-.venv/bin/python tools/build_static_site.py
-```
-
-You do not have to remember to. `.github/workflows/pages.yml` runs the same
-build on every push to `main` and publishes the result to
-<https://papichulo16.github.io/rootview/>, so editing `deliverables.py` is the
-only step needed to update the public page. Rebuilding locally is for seeing
-the change before you push.
+The public course page -- project identity, deliverables, milestones -- is a
+separate static site in its own repository, published with GitHub Pages.
+Nothing in here builds or serves it.
 
 ## Publishing a course deliverable
 
@@ -70,8 +61,8 @@ are hand-written SVG in `templates/landing.html`, matched to that wording by
 
 They are interactive with no JavaScript: hovering or tab-focusing a shape
 reveals its description through the `:has()` rules in `static/css/landing.css`.
-That keeps the running app and the published static page, which ships no
-scripts at all, behaving identically.
+A screen that cannot hover gets every description listed under the diagram
+instead, so nothing is reachable only by pointer.
 
 
 ## Pages

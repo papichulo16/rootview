@@ -9,23 +9,19 @@
 </head>
 <body>
   <header class="topbar">
-    {# static_build is set only by tools/build_static_site.py. The standalone
-       project page has no server behind it, so anything that needs one is left
-       out rather than rendered as a broken link. #}
-    <a class="brand" href="{{ './' if static_build else '/' }}">
+    <a class="brand" href="/">
       <span class="brand-mark">▣</span>
       <span class="brand-name">RootView</span>
     </a>
-    {% if not static_build %}
     <nav class="nav">
       <a href="/" class="{{ 'active' if active == 'home' }}">Home</a>
       <a href="/dashboard" class="{{ 'active' if active == 'dashboard' }}">Dashboard</a>
       <a href="/introspect" class="{{ 'active' if active == 'introspect' }}">Introspection</a>
       <a href="/docs">API</a>
     </nav>
-    {% endif %}
-    {# Only shown on pages that actually hold a stream open; on a static page a
-       permanent "connecting" indicator would read as something being broken. #}
+    {# Only shown on pages that actually hold a stream open. On the landing
+       page, which opens none, a permanent "connecting" indicator would read as
+       something being broken. #}
     {% if live %}
     <div class="conn" id="conn" data-state="connecting">
       <span class="dot"></span>
@@ -38,7 +34,6 @@
     {% block content %}{% endblock %}
   </main>
 
-  {% if not static_build %}
   <footer class="footer">
     <span>backend: <code>{{ settings.backend }}</code></span>
     <span>scan interval: <code>{{ settings.scan_interval }}s</code></span>
@@ -46,6 +41,5 @@
 
   <script src="{{ url_for('static', path='/js/app.js') }}"></script>
   {% block scripts %}{% endblock %}
-  {% endif %}
 </body>
 </html>
