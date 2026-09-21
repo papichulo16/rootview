@@ -166,6 +166,25 @@ int vmi_write_virt(vmi_session_t *session, uint64_t vaddr, const void *buf, size
     return 0;
 }
 
+int vmi_translate_virt(vmi_session_t *session, uint64_t vaddr, uint64_t *paddr, char *err, size_t err_len) {
+    if (!session->attached) {
+        if (err) snprintf(err, err_len, "session not attached");
+        return -1;
+    }
+
+    addr_t dtb;
+    if (current_dtb(session, &dtb, err, err_len) != 0) return -1;
+
+    addr_t pa;
+    if (vmi_pagetable_lookup(session->vmi, dtb, vaddr, &pa) != VMI_SUCCESS) {
+        if (err) snprintf(err, err_len, "failed to translate 0x%lx to a physical address", (unsigned long) vaddr);
+        return -1;
+    }
+
+    *paddr = pa;
+    return 0;
+}
+
 int vmi_pause(vmi_session_t *session, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");

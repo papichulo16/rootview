@@ -23,6 +23,25 @@ int hook_reg_add(hook_manager_t *mgr, const char *name, const char *reg_name,
 int hook_bp_add(hook_manager_t *mgr, const char *name, uint64_t vaddr,
                  hook_callback_t callback, void *user_data, char *err, size_t err_len);
 
+/* traps cpuid execution. leaf is a hex leaf value, or "any" to match every
+ * leaf. KVMI allows only one CPUID registration at a time, so every cpuid
+ * hook is multiplexed off one shared event. */
+int hook_cpuid_add(hook_manager_t *mgr, const char *name, const char *leaf,
+                    hook_callback_t callback, void *user_data, char *err, size_t err_len);
+
+/* traps loads/stores of one descriptor table register (idtr, gdtr, ldtr,
+ * tr). KVMI allows only one DESCRIPTOR registration at a time, so every
+ * descriptor hook is multiplexed off one shared event. */
+int hook_desc_add(hook_manager_t *mgr, const char *name, const char *table,
+                   hook_callback_t callback, void *user_data, char *err, size_t err_len);
+
+/* traps r/w/x access to the guest page containing vaddr (walks the current
+ * CR3 - pause the vm first). access is any combination of the letters r,
+ * w, x (eg. "rw", "x"). unlike hook_bp_add this never writes to guest
+ * memory, so it can't be detected by code that checksums itself. */
+int hook_mem_add(hook_manager_t *mgr, const char *name, uint64_t vaddr, const char *access,
+                  hook_callback_t callback, void *user_data, char *err, size_t err_len);
+
 int hook_remove(hook_manager_t *mgr, const char *name, char *err, size_t err_len);
 
 /* pumps the vmi event queue for timeout_ms; 0 drains only what's pending. */

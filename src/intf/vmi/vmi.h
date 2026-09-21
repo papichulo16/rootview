@@ -22,6 +22,10 @@ int vmi_write_phys(vmi_session_t *session, uint64_t paddr, const void *buf, size
 int vmi_read_virt(vmi_session_t *session, uint64_t vaddr, void *buf, size_t len, char *err, size_t err_len);
 int vmi_write_virt(vmi_session_t *session, uint64_t vaddr, const void *buf, size_t len, char *err, size_t err_len);
 
+/* walks the current CR3 to resolve vaddr to a physical address - call
+ * vmi_pause first so the address space doesn't shift mid-lookup. */
+int vmi_translate_virt(vmi_session_t *session, uint64_t vaddr, uint64_t *paddr, char *err, size_t err_len);
+
 int vmi_pause(vmi_session_t *session, char *err, size_t err_len);
 int vmi_resume(vmi_session_t *session, char *err, size_t err_len);
 

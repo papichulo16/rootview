@@ -21,6 +21,27 @@ hook_t *hook_find_bp_by_vaddr(hook_manager_t *mgr, uint64_t vaddr) {
     return NULL;
 }
 
+/* an exact leaf match wins; a hook watching every leaf only answers when
+ * nothing more specific does. */
+hook_t *hook_find_cpuid_by_leaf(hook_manager_t *mgr, uint32_t leaf) {
+    hook_t *wildcard = NULL;
+    for (int i = 0; i < mgr->count; i++) {
+        hook_t *h = &mgr->hooks[i];
+        if (!h->active || h->kind != HOOK_KIND_CPUID) continue;
+        if (h->cpuid_leaf == leaf) return h;
+        if (h->cpuid_leaf == HOOK_CPUID_ANY_LEAF) wildcard = h;
+    }
+    return wildcard;
+}
+
+hook_t *hook_find_desc(hook_manager_t *mgr, hook_desc_t descriptor) {
+    for (int i = 0; i < mgr->count; i++) {
+        hook_t *h = &mgr->hooks[i];
+        if (h->active && h->kind == HOOK_KIND_DESCRIPTOR && h->descriptor == descriptor) return h;
+    }
+    return NULL;
+}
+
 /* never compacts - active slots keep a stable address for libvmi's pointer
  * into &h->vmi_event. */
 hook_t *hook_alloc_slot(hook_manager_t *mgr) {
@@ -36,17 +57,33 @@ void hook_manager_init(hook_manager_t *mgr, vmi_session_t *session) {
     mgr->session = session;
 }
 
+/* per-hook teardown for kinds that own no shared infra - the caller clears
+ * bp_event/ss_event/cpuid_event/desc_event separately, once, since those
+ * are shared across every hook of their kind. */
+static int hook_teardown(hook_manager_t *mgr, hook_t *h, char *err, size_t err_len) {
+    switch (h->kind) {
+        case HOOK_KIND_REGISTER:
+        case HOOK_KIND_MEM:
+            vmi_clear_event(mgr->session->vmi, &h->vmi_event, NULL);
+            break;
+        case HOOK_KIND_BREAKPOINT:
+            if (vmi_write_virt(mgr->session, h->vaddr, &h->orig_byte, 1, err, err_len) != 0) return -1;
+            if (mgr->pending_bp == h) mgr->pending_bp = NULL;
+            break;
+        case HOOK_KIND_CPUID:
+        case HOOK_KIND_DESCRIPTOR:
+            break;
+    }
+    return 0;
+}
+
 void hook_manager_clear(hook_manager_t *mgr) {
     for (int i = 0; i < mgr->count; i++) {
         hook_t *h = &mgr->hooks[i];
         if (!h->active) continue;
 
-        if (h->kind == HOOK_KIND_REGISTER) {
-            vmi_clear_event(mgr->session->vmi, &h->vmi_event, NULL);
-        } else {
-            char err[128];
-            vmi_write_virt(mgr->session, h->vaddr, &h->orig_byte, 1, err, sizeof(err));
-        }
+        char err[128];
+        hook_teardown(mgr, h, err, sizeof(err));
         h->active = false;
     }
     mgr->count = 0;
@@ -57,6 +94,14 @@ void hook_manager_clear(hook_manager_t *mgr) {
         vmi_clear_event(mgr->session->vmi, &mgr->ss_event, NULL);
         mgr->bp_active = false;
     }
+    if (mgr->cpuid_active) {
+        vmi_clear_event(mgr->session->vmi, &mgr->cpuid_event, NULL);
+        mgr->cpuid_active = false;
+    }
+    if (mgr->desc_active) {
+        vmi_clear_event(mgr->session->vmi, &mgr->desc_event, NULL);
+        mgr->desc_active = false;
+    }
 }
 
 int hook_remove(hook_manager_t *mgr, const char *name, char *err, size_t err_len) {
@@ -66,12 +111,7 @@ int hook_remove(hook_manager_t *mgr, const char *name, char *err, size_t err_len
         return -1;
     }
 
-    if (h->kind == HOOK_KIND_REGISTER) {
-        vmi_clear_event(mgr->session->vmi, &h->vmi_event, NULL);
-    } else {
-        if (vmi_write_virt(mgr->session, h->vaddr, &h->orig_byte, 1, err, err_len) != 0) return -1;
-        if (mgr->pending_bp == h) mgr->pending_bp = NULL;
-    }
+    if (hook_teardown(mgr, h, err, err_len) != 0) return -1;
 
     h->active = false;
     return 0;
