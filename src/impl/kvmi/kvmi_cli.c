@@ -1,16 +1,16 @@
-#include "vmi/vmi_cli.h"
+#include "kvmi/kvmi_cli.h"
 
 #include <stdio.h>
 #include <string.h>
 
+#include "kvmi/kvmi_shell.h"
 #include "vmi/vmi.h"
-#include "vmi/vmi_shell.h"
 
 static void print_usage(void) {
     fprintf(stderr,
-            "usage: rv vmi <command> [args]\n\n"
+            "usage: rv kvmi <command> [args]\n\n"
             "commands:\n"
-            "  attach <name>   attach to a running vm and drop into the introspection shell\n");
+            "  attach <name>   attach to a running vm and drop into the introspection/hook shell\n");
 }
 
 static int cmd_attach(int argc, char **argv) {
@@ -28,12 +28,12 @@ static int cmd_attach(int argc, char **argv) {
     }
 
     printf("attached to '%s'. type 'help' for commands, 'quit' to detach.\n", name);
-    vmi_shell_run(&session);
+    kvmi_shell_run(&session);
     vmi_detach(&session);
     return 0;
 }
 
-int vmi_cli_main(int argc, char **argv) {
+int kvmi_cli_main(int argc, char **argv) {
     if (argc < 1) {
         print_usage();
         return 1;
