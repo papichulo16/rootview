@@ -170,8 +170,14 @@ int qemu_spawn(const vm_config_t *cfg, const char *qmp_socket, const char *monit
     to_abs_path(monitor_socket, mon_abs, sizeof(mon_abs));
     to_abs_path(kvmi_socket, kvmi_abs, sizeof(kvmi_abs));
 
+    /* libvirtd resolves relative disk/cdrom paths against its own cwd, not
+     * rv's, so these need the same treatment as the socket paths above. */
+    vm_config_t cfg_abs = *cfg;
+    to_abs_path(cfg->disk_image, cfg_abs.disk_image, sizeof(cfg_abs.disk_image));
+    to_abs_path(cfg->cdrom, cfg_abs.cdrom, sizeof(cfg_abs.cdrom));
+
     char xml[XML_MAX];
-    build_domain_xml(cfg, qmp_abs, mon_abs, kvmi_abs, xml, sizeof(xml));
+    build_domain_xml(&cfg_abs, qmp_abs, mon_abs, kvmi_abs, xml, sizeof(xml));
 
     virConnectPtr conn = virConnectOpen("qemu:///system");
     if (!conn) {
