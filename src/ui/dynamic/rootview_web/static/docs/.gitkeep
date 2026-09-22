@@ -1,0 +1,4 @@
+Drop course deliverables here (plan.pdf, requirements.pdf, presentation slides, ...)
+and point at them from rootview_web/deliverables.py, e.g.
+
+    {"label": "Plan", "url": "/static/docs/plan.pdf"},
