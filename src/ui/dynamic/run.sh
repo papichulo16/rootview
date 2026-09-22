@@ -30,10 +30,10 @@ note() { printf 'run.sh: %s\n' "$1"; }
 
 command -v python3 >/dev/null 2>&1 || die "python3 was not found on PATH."
 
-# pyproject.toml requires >= 3.11. Checking it here turns what would otherwise
+# pyproject.toml requires >= 3.10. Checking it here turns what would otherwise
 # be an opaque pip resolution failure into a sentence saying what to install.
-python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' || die \
-  "Python 3.11 or newer is required; python3 is $(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')."
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' || die \
+  "Python 3.10 or newer is required; python3 is $(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')."
 
 # A venv whose interpreter has gone missing is worse than no venv at all: it is
 # what a moved or copied checkout leaves behind, and every command run against
