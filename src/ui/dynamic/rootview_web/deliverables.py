@@ -40,8 +40,8 @@ SEMESTERS = [
                 "milestone": "Plan",
                 "due": "Aug 31",
                 "documents": [
-                    {"label": "Plan", "url": "docs/senior_project_plan.pdf"},
-                    {"label": "Presentation", "url": "docs/RootView_Project_Plan.pptx"},
+                    {"label": "Plan", "url": "static/docs/senior_project_plan.pdf"},
+                    {"label": "Presentation", "url": "static/docs/RootView_Project_Plan.pptx"},
                 ],
             },
             {
@@ -62,11 +62,11 @@ SEMESTERS = [
                     "Complete the Test Plan",
                 ],
                 "documents": [
-                    {"label": "Requirement", "url": ""},
-                    {"label": "Design", "url": ""},
-                    {"label": "Test", "url": ""},
-                    {"label": "Presentation", "url": ""},
-                    {"label": "Progress Evaluation", "url": ""},
+                    {"label": "Requirement", "url": "static/docs/requirement_docs-1.pdf"},
+                    {"label": "Design", "url": "static/docs/design_docs-1.pdf"},
+                    {"label": "Test", "url": "static/docs/test_docs-1.pdf"},
+                    {"label": "Presentation", "url": "static/docs/milestone_one.pdf"},
+                    {"label": "Progress Evaluation", "url": "static/docs/progress_eval_one copy-1.pdf"},
                 ],
             },
             {
