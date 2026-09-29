@@ -26,5 +26,19 @@ $(BUILD_DIR)/%.o: $(IMPL_DIR)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET) *.so*
+	rm -rf $(BUILD_DIR) $(TEST_DIR) $(TARGET) *.so*
 
+
+# offline tests: no libvmi, so only the prof pieces that read through kmem_t
+TEST_DIR := build/test
+TEST_CFLAGS := -Wall -Wextra -O2 -g -I$(INTF_DIR)
+PROF_CORE := $(IMPL_DIR)/kern/prof/kmem_dump.c $(IMPL_DIR)/kern/prof/pt_root.c $(IMPL_DIR)/kern/prof/pt_walk.c
+
+test: $(TEST_DIR)/test_pt
+	./$(TEST_DIR)/test_pt tests/fixtures
+
+$(TEST_DIR)/test_pt: tests/prof/test_pt.c $(PROF_CORE)
+	mkdir -p $(dir $@)
+	$(CC) $(TEST_CFLAGS) $^ -o $@
+
+.PHONY: all clean test
