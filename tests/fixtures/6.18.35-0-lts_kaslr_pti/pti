@@ -1,0 +1,1 @@
+not captured (collected before collect.py grepped dmesg); booted with pti=on and paused at CPL=3 with CR3 bit 12 set
