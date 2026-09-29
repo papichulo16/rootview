@@ -4,6 +4,7 @@ build/obj/
 
 .gdb_history
 *.so
+*.so.*
 
 # ram dumps: publish mem.raw.zst as a release asset, never commit
 tests/fixtures/*/mem.raw
