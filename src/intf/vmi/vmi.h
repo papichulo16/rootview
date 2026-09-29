@@ -17,13 +17,14 @@ bool vmi_is_attached(const vmi_session_t *session);
 int vmi_read_phys(vmi_session_t *session, uint64_t paddr, void *buf, size_t len, char *err, size_t err_len);
 int vmi_write_phys(vmi_session_t *session, uint64_t paddr, const void *buf, size_t len, char *err, size_t err_len);
 
-/* walks whatever page table the vm's current CR3 points at - call vmi_pause
- * first so the address space doesn't shift mid-read. */
+/* walks the page table the vm's current CR3 points at (falling back to the
+ * KPTI kernel PGD when CR3 is a user PGD that doesn't map vaddr) - call
+ * vmi_pause first so the address space doesn't shift mid-read. */
 int vmi_read_virt(vmi_session_t *session, uint64_t vaddr, void *buf, size_t len, char *err, size_t err_len);
 int vmi_write_virt(vmi_session_t *session, uint64_t vaddr, const void *buf, size_t len, char *err, size_t err_len);
 
-/* walks the current CR3 to resolve vaddr to a physical address - call
- * vmi_pause first so the address space doesn't shift mid-lookup. */
+/* resolves vaddr to a physical address the same way vmi_read_virt does -
+ * call vmi_pause first so the address space doesn't shift mid-lookup. */
 int vmi_translate_virt(vmi_session_t *session, uint64_t vaddr, uint64_t *paddr, char *err, size_t err_len);
 
 int vmi_pause(vmi_session_t *session, char *err, size_t err_len);

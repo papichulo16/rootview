@@ -104,13 +104,29 @@ int vmi_write_phys(vmi_session_t *session, uint64_t paddr, const void *buf, size
     return 0;
 }
 
-static int current_dtb(vmi_session_t *session, addr_t *dtb, char *err, size_t err_len) {
+/* physical-address bits 51:12 - drops the PCID (11:0) and no-flush (63) bits */
+#define CR3_PA_MASK 0x000ffffffffff000ull
+/* KPTI's user PGD is the kernel PGD's 8KiB-pair partner with this bit set */
+#define CR3_PTI_USER (1ull << 12)
+
+/* picks the root to walk for vaddr: CR3 as-is first, since that's the table
+ * the vcpu is really using - without KPTI bit 12 is just part of the root's
+ * address, and clearing it lands on an unrelated page. only if that doesn't
+ * map vaddr and bit 12 is set, retry with it cleared, which under KPTI is the
+ * kernel PGD behind a vcpu paused in userspace. */
+static int current_dtb(vmi_session_t *session, uint64_t vaddr, addr_t *dtb, char *err, size_t err_len) {
     uint64_t cr3;
     if (vmi_get_vcpureg(session->vmi, &cr3, CR3, 0) != VMI_SUCCESS) {
         if (err) snprintf(err, err_len, "failed to read CR3");
         return -1;
     }
-    *dtb = cr3 & ~0x1fffull;
+
+    addr_t kept = cr3 & CR3_PA_MASK, pa;
+    *dtb = kept;
+    if (vmi_pagetable_lookup(session->vmi, kept, vaddr, &pa) == VMI_SUCCESS) return 0;
+    if ((kept & CR3_PTI_USER) &&
+        vmi_pagetable_lookup(session->vmi, kept & ~CR3_PTI_USER, vaddr, &pa) == VMI_SUCCESS)
+        *dtb = kept & ~CR3_PTI_USER;
     return 0;
 }
 
@@ -131,7 +147,7 @@ int vmi_read_virt(vmi_session_t *session, uint64_t vaddr, void *buf, size_t len,
     }
 
     addr_t dtb;
-    if (current_dtb(session, &dtb, err, err_len) != 0) return -1;
+    if (current_dtb(session, vaddr, &dtb, err, err_len) != 0) return -1;
 
     access_context_t ctx;
     dtb_access_context(session, dtb, vaddr, &ctx);
@@ -152,7 +168,7 @@ int vmi_write_virt(vmi_session_t *session, uint64_t vaddr, const void *buf, size
     }
 
     addr_t dtb;
-    if (current_dtb(session, &dtb, err, err_len) != 0) return -1;
+    if (current_dtb(session, vaddr, &dtb, err, err_len) != 0) return -1;
 
     access_context_t ctx;
     dtb_access_context(session, dtb, vaddr, &ctx);
@@ -173,7 +189,7 @@ int vmi_translate_virt(vmi_session_t *session, uint64_t vaddr, uint64_t *paddr, 
     }
 
     addr_t dtb;
-    if (current_dtb(session, &dtb, err, err_len) != 0) return -1;
+    if (current_dtb(session, vaddr, &dtb, err, err_len) != 0) return -1;
 
     addr_t pa;
     if (vmi_pagetable_lookup(session->vmi, dtb, vaddr, &pa) != VMI_SUCCESS) {
