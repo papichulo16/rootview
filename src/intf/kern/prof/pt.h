@@ -36,4 +36,40 @@ int pt_translate(const kmem_t *mem, const pt_root_t *root, uint64_t va, uint64_t
 /* reads len bytes at va, re-translating at every page boundary */
 int pt_read(const kmem_t *mem, const pt_root_t *root, uint64_t va, void *buf, size_t len, char *err, size_t err_len);
 
+/* the kernel image mapping: PDPT[510] of PML4[511], 0xffffffff80000000 up */
+#define PT_KIMG_BASE 0xffffffff80000000ull
+
+/* present pages that are virtually contiguous and share the effective NX bit
+ * (set at any level of the walk). data holds the run's bytes once
+ * pt_image_read_nx has loaded it, and is NULL otherwise. */
+typedef struct {
+    uint64_t va;
+    uint64_t len;
+    bool nx;
+    unsigned char *data;
+} pt_run_t;
+
+typedef struct {
+    uint64_t start, end; /* [start, end): the image's run of present PD entries */
+    pt_run_t *runs;
+    size_t n_runs;
+} pt_image_t;
+
+/* finds the image extent: the contiguous run of present PD entries in
+ * PDPT[510], starting from the lowest one. head64 clears the entries below
+ * _text, so start is _text rounded down to 2MiB. each PD entry is a 2MiB
+ * page or a page table; the pages inside a table can be holes (freed init
+ * memory), which split runs but not the extent. with nokaslr the modules
+ * can follow the image in the same PD, which makes the extent longer but
+ * doesn't move start. */
+int pt_image(const kmem_t *mem, const pt_root_t *root, pt_image_t *img, char *err, size_t err_len);
+
+/* reads every NX run into memory, for the kallsyms and banner scans */
+int pt_image_read_nx(const kmem_t *mem, const pt_root_t *root, pt_image_t *img, char *err, size_t err_len);
+
+/* points at len loaded bytes at va, or NULL unless one loaded run holds all of them */
+const unsigned char *pt_image_ptr(const pt_image_t *img, uint64_t va, size_t len);
+
+void pt_image_free(pt_image_t *img);
+
 #endif

@@ -32,7 +32,7 @@ Not committed (see `.gitignore`):
 
 ## Running the dump tests
 
-`make test` always runs the synthetic page-table tests. It runs each fixture's dump test only when `mem.raw` is present, and prints `SKIP` otherwise. To fetch a dump:
+`make test` always runs the synthetic tests: page tables and `pt_image` (`test_pt`), and kallsyms tables in all three layouts plus corrupted and truncated copies (`test_ksym`). It runs each fixture's dump tests only when `mem.raw` is present, and prints `SKIP` otherwise. With a dump, `test_ksym` decodes kallsyms out of it and diffs every core symbol against `kallsyms.gz`, then checks that every other decoder switch combination is rejected. To fetch a dump:
 
 ```sh
 cd tests/fixtures/<fixture>

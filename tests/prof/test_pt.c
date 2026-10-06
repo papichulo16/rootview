@@ -1,27 +1,9 @@
-/* M1 tests: pt_root/pt_walk against synthetic page tables (always run) and
- * against the ram-dump fixtures under tests/fixtures (skipped per fixture
+/* M1/M2 tests: pt_root/pt_walk/pt_image against synthetic page tables
+ * (always run) and against the ram-dump fixtures under tests/fixtures (skipped per fixture
  * when its mem.raw isn't present - see tests/fixtures/README.md). */
-#include <dirent.h>
 #include <inttypes.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
 
-#include "kern/prof/kmem.h"
-#include "kern/prof/pt.h"
-
-static int failures;
-
-#define CHECK(cond, ...)                                                                                               \
-    do {                                                                                                               \
-        if (!(cond)) {                                                                                                 \
-            failures++;                                                                                                \
-            printf("  FAIL %s:%d: ", __FILE__, __LINE__);                                                              \
-            printf(__VA_ARGS__);                                                                                       \
-            putchar('\n');                                                                                             \
-        }                                                                                                              \
-    } while (0)
+#include "fixture.h"
 
 /* ---- synthetic guest memory ---- */
 
@@ -221,87 +203,98 @@ static void test_la57(void) {
     free(s.ram);
 }
 
+/* PD index -> its 2MiB slot under PT_KIMG_BASE */
+#define KIMG(i) (PT_KIMG_BASE + ((uint64_t) (i) << 21))
+
+static void test_image_synthetic(void) {
+    printf("synthetic: pt_image extent, runs, NX, holes, 5-level\n");
+    syn_t s;
+    kmem_t m = syn_mem(&s);
+    uint64_t pml5 = 0x1000, pgd = 0x2000, pdpt = 0x3000, pd = 0x4000, pt = 0x5000, mod_pd = 0x6000;
+    char err[256];
+
+    set_ent(&s, pml5, 511, pgd | P);
+    set_ent(&s, pgd, 511, pdpt | P);
+    set_ent(&s, pdpt, 510, pd | P);
+    set_ent(&s, pdpt, 511, mod_pd | P); /* modules, never part of the image */
+    set_ent(&s, mod_pd, 0, 0xe00000 | P | PTE_PS);
+
+    /* 128-129 text (X), 130 rodata (NX), 131 a table split by a hole whose
+     * PTEs don't carry NX but the PDE does, 132 NX again, 133 a gap, 140 a
+     * stray mapping past the gap (nokaslr modules) that must not count */
+    set_ent(&s, pd, 128, 0x200000 | P | PTE_PS);
+    set_ent(&s, pd, 129, 0x400000 | P | PTE_PS);
+    set_ent(&s, pd, 130, 0x600000 | P | PTE_PS | NX);
+    set_ent(&s, pd, 131, pt | P | NX);
+    for (int j = 0; j < 512; j++)
+        if (j != 10) set_ent(&s, pt, j, (0xa00000 + (uint64_t) j * 4096) | P);
+    set_ent(&s, pd, 132, 0x800000 | P | PTE_PS | NX);
+    set_ent(&s, pd, 140, 0xc00000 | P | PTE_PS | NX);
+    memcpy(s.ram + 0x600000 + 0x1ffffe, "RO", 2); /* last bytes of 130 */
+    memcpy(s.ram + 0xa00000, "PT", 2);           /* first bytes of 131 */
+
+    pt_root_t r = {.pgd = pgd, .la57 = false};
+    pt_image_t img;
+    CHECK(pt_image(&m, &r, &img, err, sizeof(err)) == 0, "%s", err);
+    CHECK(img.start == KIMG(128) && img.end == KIMG(133), "extent 0x%" PRIx64 "-0x%" PRIx64, img.start, img.end);
+    CHECK(img.n_runs == 3, "%zu runs, want 3", img.n_runs);
+    if (img.n_runs == 3) {
+        CHECK(img.runs[0].va == KIMG(128) && img.runs[0].len == 4ull << 20 && !img.runs[0].nx, "run 0 wrong");
+        CHECK(img.runs[1].va == KIMG(130) && img.runs[1].len == (2ull << 20) + 10 * 4096 && img.runs[1].nx,
+              "run 1 0x%" PRIx64 "+0x%" PRIx64, img.runs[1].va, img.runs[1].len);
+        CHECK(img.runs[2].va == KIMG(131) + 11 * 4096 && img.runs[2].len == 501 * 4096ull + (2ull << 20) &&
+                  img.runs[2].nx,
+              "run 2 0x%" PRIx64 "+0x%" PRIx64, img.runs[2].va, img.runs[2].len);
+    }
+
+    CHECK(pt_image_read_nx(&m, &r, &img, err, sizeof(err)) == 0, "%s", err);
+    CHECK(img.runs[0].data == NULL, "X run was loaded");
+    const unsigned char *p = pt_image_ptr(&img, KIMG(131) - 2, 4);
+    CHECK(p && memcmp(p, "ROPT", 4) == 0, "read across the 2M page / table seam");
+    CHECK(pt_image_ptr(&img, KIMG(131) + 10 * 4096 - 2, 4) == NULL, "read across the hole should fail");
+    CHECK(pt_image_ptr(&img, KIMG(128), 1) == NULL, "X pages aren't loaded");
+    pt_image_free(&img);
+
+    /* the same tables one level down under LA57 */
+    r = (pt_root_t) {.pgd = pml5, .la57 = true};
+    CHECK(pt_image(&m, &r, &img, err, sizeof(err)) == 0, "%s", err);
+    CHECK(img.start == KIMG(128) && img.n_runs == 3, "5-level: start 0x%" PRIx64 ", %zu runs", img.start,
+          img.n_runs);
+    pt_image_free(&img);
+
+    /* nothing under PDPT[510] */
+    r = (pt_root_t) {.pgd = pgd, .la57 = false};
+    memset(s.ram + pd, 0, 4096);
+    CHECK(pt_image(&m, &r, &img, err, sizeof(err)) != 0, "empty PD should fail");
+    set_ent(&s, pdpt, 510, 0);
+    CHECK(pt_image(&m, &r, &img, err, sizeof(err)) != 0, "missing PDPT[510] should fail");
+    free(s.ram);
+}
+
 /* ---- ram-dump fixtures ---- */
 
-static int read_file(const char *path, unsigned char **out, size_t *len) {
-    FILE *f = fopen(path, "rb");
-    if (!f) return -1;
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    rewind(f);
-    *out = malloc((size_t) n + 1);
-    *len = fread(*out, 1, (size_t) n, f);
-    (*out)[*len] = '\0';
-    fclose(f);
-    return 0;
-}
-
-static int regs_get(const char *regs, const char *key, uint64_t *val) {
-    size_t kl = strlen(key);
-    for (const char *p = regs; p && *p; p = strchr(p, '\n') ? strchr(p, '\n') + 1 : NULL) {
-        if (strncmp(p, key, kl) == 0 && p[kl] == '=') {
-            *val = strtoull(p + kl + 1, NULL, 0);
-            return 0;
-        }
-    }
-    return -1;
-}
-
-static int sym_get(const char *kallsyms, const char *name, uint64_t *addr) {
-    size_t nl = strlen(name);
-    for (const char *p = kallsyms; p && *p; p = strchr(p, '\n') ? strchr(p, '\n') + 1 : NULL) {
-        const char *end = strchr(p, '\n');
-        size_t ll = end ? (size_t) (end - p) : strlen(p);
-        if (ll > nl + 1 && strncmp(p + ll - nl, name, nl) == 0 && p[ll - nl - 1] == ' ') {
-            *addr = strtoull(p, NULL, 16);
-            return 0;
-        }
-    }
-    return -1;
-}
-
 static void test_fixture(const char *dir, const char *name) {
-    char path[4096];
-    struct stat st;
-    snprintf(path, sizeof(path), "%s/%s/regs", dir, name);
-    if (stat(path, &st) != 0) return; /* not a fixture */
-    snprintf(path, sizeof(path), "%s/%s/mem.raw", dir, name);
-    if (stat(path, &st) != 0) {
-        printf("fixture %s: SKIP (no mem.raw)\n", name);
-        return;
-    }
+    if (fixture_has_dump(dir, name) <= 0) return;
     printf("fixture %s\n", name);
     int before = failures;
 
-    unsigned char *regs = NULL, *syms = NULL, *live = NULL;
-    size_t regs_len, syms_len, live_len;
-    char p2[4096];
-    snprintf(p2, sizeof(p2), "%s/%s/regs", dir, name);
-    CHECK(read_file(p2, &regs, &regs_len) == 0, "missing %s", p2);
-    snprintf(p2, sizeof(p2), "%s/%s/symcheck", dir, name);
-    CHECK(read_file(p2, &syms, &syms_len) == 0, "missing %s", p2);
-    snprintf(p2, sizeof(p2), "%s/%s/live_banner.bin", dir, name);
-    CHECK(read_file(p2, &live, &live_len) == 0, "missing %s", p2);
-    if (!regs || !syms || !live) goto out;
+    char *regs = NULL, *syms = NULL, *live = NULL;
+    size_t live_len = 0;
+    syms = fixture_file(dir, name, "symcheck", NULL);
+    live = fixture_file(dir, name, "live_banner.bin", &live_len);
+    CHECK(syms && live, "missing symcheck or live_banner.bin");
+    if (!syms || !live) goto out;
 
-    uint64_t cr3, cr4, lstar, banner, init_top_pgt;
-    CHECK(regs_get((char *) regs, "cr3", &cr3) == 0, "no cr3");
-    CHECK(regs_get((char *) regs, "cr4", &cr4) == 0, "no cr4");
-    CHECK(regs_get((char *) regs, "lstar", &lstar) == 0, "no lstar");
-    CHECK(sym_get((char *) syms, "linux_banner", &banner) == 0, "no linux_banner");
-    CHECK(sym_get((char *) syms, "init_top_pgt", &init_top_pgt) == 0, "no init_top_pgt");
+    uint64_t cr3, banner, init_top_pgt;
+    CHECK(sym_get(syms, "linux_banner", &banner) == 0, "no linux_banner");
+    CHECK(sym_get(syms, "init_top_pgt", &init_top_pgt) == 0, "no init_top_pgt");
     if (failures != before) goto out;
 
     kmem_t m;
-    char err[256];
-    CHECK(kmem_dump_open(path, &m, err, sizeof(err)) == 0, "%s", err);
-
     pt_root_t r;
-    if (pt_root_from_cr3(&m, cr3, cr4, lstar, &r, err, sizeof(err)) != 0) {
-        CHECK(0, "pt_root: %s", err);
-        kmem_close(&m);
-        goto out;
-    }
+    char err[256];
+    if (fixture_open(dir, name, &m, &r, &regs) != 0) goto out;
+    regs_get(regs, "cr3", &cr3);
     bool flipped = (r.pgd ^ (cr3 & PT_PA_MASK)) != 0;
     printf("  cr3 0x%" PRIx64 " -> root 0x%" PRIx64 " (%s)\n", cr3, r.pgd,
            flipped ? "bit 12 cleared: KPTI user PGD" : "cr3 as-is");
@@ -322,6 +315,25 @@ static void test_fixture(const char *dir, const char *name) {
     kmem_read_pa(&m, r.pgd + 511 * 8, &b, 8, NULL, 0);
     CHECK(a == b, "PML4[511] differs: init_top_pgt 0x%" PRIx64 " root 0x%" PRIx64, a, b);
 
+    /* the image extent holds the syscall entry and the banner, and LSTAR is
+     * executable while the banner isn't */
+    uint64_t lstar;
+    regs_get(regs, "lstar", &lstar);
+    pt_image_t img;
+    if (pt_image(&m, &r, &img, err, sizeof(err)) == 0) {
+        printf("  image 0x%" PRIx64 "-0x%" PRIx64 ", %zu runs\n", img.start, img.end, img.n_runs);
+        CHECK(img.start <= lstar && lstar < img.end, "lstar outside the image");
+        CHECK(img.start <= banner && banner < img.end, "linux_banner outside the image");
+        for (size_t i = 0; i < img.n_runs; i++) {
+            const pt_run_t *run = &img.runs[i];
+            if (lstar - run->va < run->len) CHECK(!run->nx, "lstar's page is NX");
+            if (banner - run->va < run->len) CHECK(run->nx, "linux_banner's page is executable");
+        }
+        pt_image_free(&img);
+    } else {
+        CHECK(0, "pt_image: %s", err);
+    }
+
     kmem_close(&m);
 out:
     free(regs);
@@ -337,26 +349,9 @@ int main(int argc, char **argv) {
     test_walk_sizes();
     test_la57();
 
-    const char *dir = argc > 1 ? argv[1] : "tests/fixtures";
-    DIR *d = opendir(dir);
-    if (d) {
-        struct dirent *e;
-        char *names[64];
-        int n = 0;
-        while ((e = readdir(d)) && n < 64) {
-            char p[4096];
-            struct stat st;
-            snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
-            if (e->d_name[0] != '.' && stat(p, &st) == 0 && S_ISDIR(st.st_mode)) names[n++] = strdup(e->d_name);
-        }
-        closedir(d);
-        for (int i = 0; i < n; i++) {
-            int before = failures;
-            test_fixture(dir, names[i]);
-            if (failures != before) printf("  (fixture %s failed)\n", names[i]);
-            free(names[i]);
-        }
-    }
+    test_image_synthetic();
+
+    for_each_fixture(argc > 1 ? argv[1] : "tests/fixtures", test_fixture);
 
     printf(failures ? "\n%d FAILED\n" : "\nall passed\n", failures);
     return failures ? 1 : 0;
