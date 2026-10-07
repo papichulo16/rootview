@@ -16,6 +16,7 @@ Committed (small, and the ground truth everything gets diffed against):
 
 - `kallsyms.gz`: `/proc/kallsyms` with `kptr_restrict=0`
 - `vmlinux.btf.gz`: `/sys/kernel/btf/vmlinux`
+- `pahole.txt`: `pahole -F btf -C task_struct,bpf_prog` over the unzipped `vmlinux.btf` (pahole 1.32), generated on the host rather than by `collect.py`
 - `config`: the relevant `CONFIG_*` lines
 - `cmdline`, `uname`: `/proc/cmdline` and `uname -r`
 - `symcheck`: the kallsyms lines for the symbols the profiler needs
@@ -32,7 +33,7 @@ Not committed (see `.gitignore`):
 
 ## Running the dump tests
 
-`make test` always runs the synthetic tests: page tables and `pt_image` (`test_pt`), and kallsyms tables in all three layouts plus corrupted and truncated copies (`test_ksym`). It runs each fixture's dump tests only when `mem.raw` is present, and prints `SKIP` otherwise. With a dump, `test_ksym` decodes kallsyms out of it and diffs every core symbol against `kallsyms.gz`, then checks that every other decoder switch combination is rejected. To fetch a dump:
+`make test` always runs the synthetic tests: page tables and `pt_image` (`test_pt`), kallsyms tables in all three layouts plus corrupted and truncated copies (`test_ksym`), and a synthetic BTF blob with every kind plus corrupted copies (`test_btf`). `test_btf` also parses every fixture's `vmlinux.btf.gz` and diffs about 45 `task_struct` and `bpf_prog` fields (offset, bitfield width, size) against `pahole.txt`. Both files are committed, so that part needs no dump. It runs each fixture's dump tests only when `mem.raw` is present, and prints `SKIP` otherwise. With a dump, `test_ksym` decodes kallsyms out of it and diffs every core symbol against `kallsyms.gz`, then checks that every other decoder switch combination is rejected. `test_btf` finds `.BTF` in the dump by `__start_BTF` and again by a header scan with no symbols, and compares the blob byte for byte with `vmlinux.btf.gz`. To fetch a dump:
 
 ```sh
 cd tests/fixtures/<fixture>

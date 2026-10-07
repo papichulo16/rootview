@@ -32,12 +32,13 @@ clean:
 # offline tests: no libvmi, so only the prof pieces that read through kmem_t
 TEST_DIR := build/test
 TEST_CFLAGS := -Wall -Wextra -O2 -g -I$(INTF_DIR)
-PROF_CORE := $(addprefix $(IMPL_DIR)/kern/prof/,kmem_dump.c pt_root.c pt_walk.c pt_image.c ksym.c)
-PROF_TESTS := test_pt test_ksym
+PROF_CORE := $(addprefix $(IMPL_DIR)/kern/prof/,kmem_dump.c pt_root.c pt_walk.c pt_image.c ksym.c btf.c)
+PROF_TESTS := test_pt test_ksym test_btf
 
 test: $(addprefix $(TEST_DIR)/,$(PROF_TESTS))
 	./$(TEST_DIR)/test_pt tests/fixtures
 	./$(TEST_DIR)/test_ksym tests/fixtures
+	./$(TEST_DIR)/test_btf tests/fixtures
 
 $(TEST_DIR)/test_%: tests/prof/test_%.c tests/prof/fixture.h $(PROF_CORE)
 	mkdir -p $(dir $@)
