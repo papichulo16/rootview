@@ -72,4 +72,6 @@ All environment variables, all optional:
 | `ROOTVIEW_BACKEND` | `none` | `none` or `libvmi` |
 | `ROOTVIEW_SCAN_INTERVAL` | `5.0` | Seconds between detection passes |
 | `ROOTVIEW_HOST` / `ROOTVIEW_PORT` | `127.0.0.1` / `8000` | Bind address |
+| `ROOTVIEW_LIB` | `<repo>/librootview.so` | The engine library the bindings (`backends/rvlib.py`) load; build it with `make lib` |
+| `ROOTVIEW_TEST_VM` | first running kvmi vm | Guest for `tests/test_rvlib.py`, which skips without one |
 

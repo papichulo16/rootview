@@ -9,6 +9,10 @@
 /* store root is ./.rootview/vms, created on first use */
 const char *vm_store_root(void);
 
+/* moves the store to <dir>/.rootview/vms, for callers whose cwd isn't the
+ * repo (the bindings, loaded into the web server) */
+void vm_store_set_base(const char *dir);
+
 void vm_store_dir(const char *name, char out[PATH_MAX]);
 void vm_store_config_path(const char *name, char out[PATH_MAX]);
 void vm_store_state_path(const char *name, char out[PATH_MAX]);

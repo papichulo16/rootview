@@ -18,6 +18,10 @@ OBJS := $(patsubst $(IMPL_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 
 all: $(TARGET)
 
+# librootview.so for the python bindings; see bind/Makefile
+lib:
+	$(MAKE) -C bind
+
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(OBJS) $(LDFLAGS) -o $@
 
@@ -25,8 +29,10 @@ $(BUILD_DIR)/%.o: $(IMPL_DIR)/%.c
 	mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# leaves the libvmi.so* copied next to rv alone
 clean:
-	rm -rf $(BUILD_DIR) $(TEST_DIR) $(TARGET) *.so*
+	rm -rf $(BUILD_DIR) $(TEST_DIR) $(TARGET)
+	$(MAKE) -C bind clean
 
 
 # offline tests: no libvmi, so only the prof pieces that read through kmem_t
@@ -46,4 +52,4 @@ $(TEST_DIR)/test_%: tests/prof/test_%.c tests/prof/fixture.h $(PROF_CORE)
 	mkdir -p $(dir $@)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
-.PHONY: all clean test
+.PHONY: all clean lib test

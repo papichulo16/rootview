@@ -6,13 +6,19 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static const char *ROOT = ".rootview/vms";
+static char base[PATH_MAX] = ".rootview";
+static char root[PATH_MAX] = ".rootview/vms";
+
+void vm_store_set_base(const char *dir) {
+    snprintf(base, sizeof(base), "%s/.rootview", dir);
+    snprintf(root, sizeof(root), "%s/vms", base);
+}
 
 const char *vm_store_root(void) {
     struct stat st;
-    if (stat(".rootview", &st) != 0) mkdir(".rootview", 0755);
-    if (stat(ROOT, &st) != 0) mkdir(ROOT, 0755);
-    return ROOT;
+    if (stat(base, &st) != 0) mkdir(base, 0755);
+    if (stat(root, &st) != 0) mkdir(root, 0755);
+    return root;
 }
 
 void vm_store_dir(const char *name, char out[PATH_MAX]) {
