@@ -8,6 +8,9 @@
 
 #include "hook/hook.h"
 #include "hook/hook_types.h"
+#include "kern/prof/kfield.h"
+#include "kern/prof/kprof.h"
+#include "kern/prof/kprof_vmi.h"
 #include "vmi/vmi.h"
 #include "vmi/vmi_reg_names.h"
 
@@ -29,6 +32,13 @@ static void print_help(void) {
            "                              only lands on 'resume', 'reg' keeps showing the\n"
            "                              old value until then\n"
            "  regs                        dump the common registers\n"
+           "\n"
+           "kernel profile commands (prof pauses and resumes the vm):\n"
+           "  prof                        build the kernel profile: root, kallsyms, BTF\n"
+           "  tasks                       walk init_task.tasks: pid and comm of each process\n"
+           "  field <type> <path> [vaddr hex]\n"
+           "                              resolve a struct field (\"task_struct se.vruntime\")\n"
+           "                              and, given the struct's address, read it\n"
            "\n"
            "hook commands:\n"
            "  watch <name> <cr0|cr3|cr4|msr_all>   hook writes to a register\n"
@@ -411,7 +421,135 @@ static void cmd_resume(vmi_session_t *session) {
     else printf("resumed\n");
 }
 
-static bool dispatch(vmi_session_t *session, hook_manager_t *mgr, char *line) {
+typedef struct {
+    kprof_target_t target;
+    kprof_t kp;
+    bool ready;
+} prof_state_t;
+
+static void cmd_prof(vmi_session_t *session, prof_state_t *ps) {
+    if (ps->ready) kprof_free(&ps->kp);
+    ps->ready = false;
+    kprof_vmi_target(session, &ps->target);
+
+    char err[512];
+    if (kprof_init(&ps->kp, &ps->target, err, sizeof(err)) != 0) {
+        printf("error: %s\n", err);
+        return;
+    }
+    ps->ready = true;
+    kprof_t *kp = &ps->kp;
+    printf("%s\n", kp->banner);
+    printf("  release      %s (%u.%u.%u)\n", kp->release, kp->major, kp->minor, kp->patch);
+    printf("  image        0x%016" PRIx64 "-0x%016" PRIx64 "\n", kp->img.start, kp->img.end);
+    printf("  vcpu root    0x%" PRIx64 " (cr3 0x%" PRIx64 ")\n", kp->vcpu_root.pgd, kp->regs.cr3);
+    printf("  init_top_pgt 0x%" PRIx64 "\n", kp->root.pgd);
+    printf("  kallsyms     %zu symbols\n", kp->ksym.n);
+    printf("  btf          %u types at 0x%016" PRIx64 " (%s)\n", kp->btf.n, kp->btf.va,
+           kp->btf.by_symbol ? "__start_BTF" : "scan");
+    printf("  init_task    0x%016" PRIx64 " (comm swapper/0)\n", kp->init_task);
+}
+
+static void cmd_tasks(prof_state_t *ps) {
+    if (!ps->ready) {
+        printf("error: run 'prof' first\n");
+        return;
+    }
+    const kprof_t *kp = &ps->kp;
+    char err[256];
+    kfield_t f_next, f_pid, f_comm;
+    if (kfield_resolve(&kp->btf, "task_struct", "tasks.next", &f_next, err, sizeof(err)) != 0 ||
+        kfield_resolve(&kp->btf, "task_struct", "pid", &f_pid, err, sizeof(err)) != 0 ||
+        kfield_resolve(&kp->btf, "task_struct", "comm", &f_comm, err, sizeof(err)) != 0) {
+        printf("error: %s\n", err);
+        return;
+    }
+    /* the fields sit near each other; one read spans them */
+    uint64_t lo = f_next.offset, hi = f_next.offset + f_next.size;
+    const kfield_t *fs[] = {&f_pid, &f_comm};
+    for (size_t i = 0; i < 2; i++) {
+        if (fs[i]->offset < lo) lo = fs[i]->offset;
+        if (fs[i]->offset + fs[i]->size > hi) hi = fs[i]->offset + fs[i]->size;
+    }
+    unsigned char buf[DUMP_MAX];
+    if (hi - lo > sizeof(buf)) {
+        printf("error: task_struct fields span %" PRIu64 " bytes\n", hi - lo);
+        return;
+    }
+    kfield_t rel[3] = {f_next, f_pid, f_comm};
+    for (size_t i = 0; i < 3; i++) rel[i].offset -= lo;
+
+    if (kprof_pause(kp, err, sizeof(err)) != 0) {
+        printf("error: %s\n", err);
+        return;
+    }
+    printf("%7s  %s\n", "PID", "COMM");
+    uint64_t task = kp->init_task;
+    size_t n = 0;
+    for (; n < 1000000; n++) {
+        kval_t next, pid, comm;
+        if (kprof_read(kp, task + lo, buf, hi - lo, err, sizeof(err)) != 0) {
+            printf("error: task 0x%016" PRIx64 ": %s\n", task, err);
+            break;
+        }
+        kfield_decode(&kp->btf, &rel[0], buf, hi - lo, &next, NULL, 0);
+        if (task != kp->init_task) {
+            kfield_decode(&kp->btf, &rel[1], buf, hi - lo, &pid, NULL, 0);
+            kfield_decode(&kp->btf, &rel[2], buf, hi - lo, &comm, NULL, 0);
+            printf("%7" PRId64 "  %s\n", pid.s, (const char *) comm.bytes);
+            kval_free(&comm);
+        }
+        task = next.u - f_next.offset;
+        if (task == kp->init_task) break;
+    }
+    if (kprof_resume(kp, err, sizeof(err)) != 0) printf("error: %s\n", err);
+}
+
+static void cmd_field(prof_state_t *ps, const char *args) {
+    char type[128], path[256];
+    uint64_t va = 0;
+    int n = sscanf(args, "%127s %255s %" SCNx64, type, path, &va);
+    if (n < 2) {
+        printf("usage: field <type> <path> [vaddr hex]\n");
+        return;
+    }
+    if (!ps->ready) {
+        printf("error: run 'prof' first\n");
+        return;
+    }
+    const kprof_t *kp = &ps->kp;
+    kfield_t f;
+    char err[512];
+    if (kfield_resolve(&kp->btf, type, path, &f, err, sizeof(err)) != 0) {
+        printf("error: %s\n", err);
+        return;
+    }
+    btf_type_t t, r;
+    btf_type(&kp->btf, f.type, &t);
+    printf("%s.%s: +0x%" PRIx64 " size %u, %s, type %u (%s %s)", type, path, f.offset, f.size,
+           kfield_kind_name(f.kind), f.type, btf_kind_name(t.kind), t.name[0] ? t.name : "<anon>");
+    if (f.bit_size) printf(", bits %u..%u", f.bit_off, f.bit_off + f.bit_size - 1);
+    if (f.ref && btf_type(&kp->btf, f.ref, &r) == 0) printf(", -> %s %s", btf_kind_name(r.kind), r.name);
+    putchar('\n');
+    if (n < 3) return;
+
+    kval_t v;
+    if (kfield_read(kp, &f, va, &v, err, sizeof(err)) != 0) {
+        printf("error: %s\n", err);
+        return;
+    }
+    switch (v.kind) {
+    case KF_U: printf("= %" PRIu64 " (0x%" PRIx64 ")\n", v.u, v.u); break;
+    case KF_S: printf("= %" PRId64 "\n", v.s); break;
+    case KF_PTR: printf("= 0x%016" PRIx64 "\n", v.u); break;
+    case KF_ENUM: printf("= %" PRId64 " (%s)\n", v.s, v.enum_name ? v.enum_name : "?"); break;
+    case KF_CSTR: printf("= \"%s\"\n", (const char *) v.bytes); break;
+    case KF_BYTES: hex_dump(va + f.offset, v.bytes, v.len > DUMP_MAX ? DUMP_MAX : v.len); break;
+    }
+    kval_free(&v);
+}
+
+static bool dispatch(vmi_session_t *session, hook_manager_t *mgr, prof_state_t *ps, char *line) {
     char *cmd = strtok(line, " \t\r\n");
     if (!cmd) return true;
     char *args = strtok(NULL, "\r\n");
@@ -426,6 +564,10 @@ static bool dispatch(vmi_session_t *session, hook_manager_t *mgr, char *line) {
     else if (strcmp(cmd, "reg") == 0) cmd_read_reg(session, args);
     else if (strcmp(cmd, "setreg") == 0) cmd_write_reg(session, args);
     else if (strcmp(cmd, "regs") == 0) cmd_dump_regs(session);
+    /* kernel profile commands */
+    else if (strcmp(cmd, "prof") == 0) cmd_prof(session, ps);
+    else if (strcmp(cmd, "tasks") == 0) cmd_tasks(ps);
+    else if (strcmp(cmd, "field") == 0) cmd_field(ps, args);
     /* hook commands */
     else if (strcmp(cmd, "watch") == 0) cmd_watch(mgr, args);
     else if (strcmp(cmd, "bp") == 0) cmd_bp(mgr, args);
@@ -448,6 +590,7 @@ static bool dispatch(vmi_session_t *session, hook_manager_t *mgr, char *line) {
 void kvmi_shell_run(vmi_session_t *session) {
     hook_manager_t mgr;
     hook_manager_init(&mgr, session);
+    prof_state_t ps = {0};
 
     char line[DUMP_MAX * 2 + 64];
     while (vmi_is_attached(session)) {
@@ -458,8 +601,9 @@ void kvmi_shell_run(vmi_session_t *session) {
             putchar('\n');
             break;
         }
-        if (!dispatch(session, &mgr, line)) break;
+        if (!dispatch(session, &mgr, &ps, line)) break;
     }
 
+    if (ps.ready) kprof_free(&ps.kp);
     hook_manager_clear(&mgr);
 }

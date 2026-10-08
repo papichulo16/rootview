@@ -2,9 +2,11 @@
 """Boots a kernel under plain qemu/kvm and captures one prof test fixture.
 
 Guest side (over the serial console): /proc/kallsyms with kptr_restrict=0,
-/sys/kernel/btf/vmlinux, uname -r, /proc/cmdline, MSR_LSTAR, and the PTI
-status. Host side (qemu monitor): a live read of linux_banner, the paused
-vcpu's registers, and a pmemsave of all guest ram taken in the same pause.
+/sys/kernel/btf/vmlinux, uname -r, /proc/cmdline, MSR_LSTAR, the PTI
+status, and - last thing before the pause - every /proc/<pid>'s comm, which
+is what ps lists. Host side (qemu monitor): a live read of linux_banner, the
+paused vcpu's registers, and a pmemsave of all guest ram taken in the same
+pause. pahole.txt comes from the BTF on the host, when pahole is installed.
 
 The guest needs a busybox root shell on ttyS0 (--login root for the alpine
 iso's getty) and virtio_blk; the fixture files are tarred onto a scratch
@@ -77,6 +79,7 @@ class Vm:
         while time.time() < end:
             i = self.buf.find(pat)
             if i >= 0:
+                self.consumed = self.buf[:i + len(pat)]
                 self.buf = self.buf[i + len(pat):]
                 return
             try:
@@ -93,6 +96,15 @@ class Vm:
         # the quotes keep the echoed command line from matching the marker
         self.ser.sendall(f"{cmd}; echo DO''NE_{tag}\n".encode())
         self.expect(f"DONE_{tag}".encode(), timeout)
+
+    def sh_out(self, cmd, timeout=300):
+        """runs cmd and returns what it printed"""
+        tag = os.urandom(4).hex()
+        self.ser.sendall(f"echo BE''GIN_{tag}; {cmd}; echo DO''NE_{tag}\n".encode())
+        self.expect(f"BEGIN_{tag}\r\n".encode(), timeout)
+        self.expect(f"DONE_{tag}".encode(), timeout)
+        out = self.consumed
+        return out[:out.rfind(f"DONE_{tag}".encode())].decode(errors="replace").replace("\r", "")
 
     def hmp(self, cmd):
         s = self._connect(self.mon_path)
@@ -123,7 +135,7 @@ def cpl(regs):
 
 
 def reg(regs, name):
-    return int(re.search(rf"\b{name}=([0-9a-f]+)", regs).group(1), 16)
+    return int(re.search(rf"\b{name}=\s*([0-9a-f]+)", regs).group(1), 16)
 
 
 def main():
@@ -186,6 +198,9 @@ def main():
         if a.pause_in == "user":
             vm.ser.sendall(b"while :; do :; done &\n")
             time.sleep(1)
+        # what ps would list, as close to the pause as the serial line allows:
+        # the shell's own children have exited by the time DONE comes back
+        ps = vm.sh_out("for p in /proc/[0-9]*; do echo \"${p#/proc/} $(cat $p/comm)\"; done 2>/dev/null")
         for _ in range(200):
             vm.hmp("stop")
             regs = vm.hmp("info registers")
@@ -221,7 +236,12 @@ def main():
         open(f"{dest}/regs.txt", "w").write(regs)
         open(f"{dest}/regs", "w").write(
             f"cr3=0x{reg(regs, 'CR3'):x}\ncr4=0x{reg(regs, 'CR4'):x}\nrip=0x{reg(regs, 'RIP'):x}\n"
-            f"cpl={cpl(regs)}\nefer=0x{reg(regs, 'EFER'):x}\nlstar=0x{lstar:x}\n")
+            f"cpl={cpl(regs)}\nefer=0x{reg(regs, 'EFER'):x}\nlstar=0x{lstar:x}\nidtr=0x{reg(regs, 'IDT'):x}\n")
+        open(f"{dest}/ps", "w").writelines(
+            f"{l}\n" for l in sorted(ps.strip().splitlines(), key=lambda l: int(l.split()[0])) if l.split()[0].isdigit() and len(l.split(None, 1)) == 2)
+        if shutil.which("pahole"):
+            with open(f"{dest}/pahole.txt", "w") as o:
+                subprocess.run(["pahole", "-F", "btf", "-C", "task_struct,bpf_prog", f"{fx}/vmlinux.btf"], stdout=o, check=True)
         open(f"{dest}/live_banner.bin", "wb").write(live)
         qcmd = [c.replace(work, "$WORK") for c in vm.cmdline]
         open(f"{dest}/qemu.cmd", "w").write(" ".join(qcmd) + "\n")

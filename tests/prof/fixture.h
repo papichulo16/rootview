@@ -60,7 +60,7 @@ static int regs_get(const char *regs, const char *key, uint64_t *val) {
 }
 
 /* address of name in kallsyms-format text */
-static int sym_get(const char *kallsyms, const char *name, uint64_t *addr) {
+__attribute__((unused)) static int sym_get(const char *kallsyms, const char *name, uint64_t *addr) {
     size_t nl = strlen(name);
     for (const char *p = kallsyms; p && *p; p = strchr(p, '\n') ? strchr(p, '\n') + 1 : NULL) {
         const char *end = strchr(p, '\n');
@@ -90,7 +90,7 @@ static int fixture_has_dump(const char *dir, const char *name) {
 
 /* opens the dump and derives the kernel root from regs, the way the live
  * path does. regs_out (optional) keeps the regs text. */
-static int fixture_open(const char *dir, const char *name, kmem_t *m, pt_root_t *r, char **regs_out) {
+__attribute__((unused)) static int fixture_open(const char *dir, const char *name, kmem_t *m, pt_root_t *r, char **regs_out) {
     char *regs = fixture_file(dir, name, "regs", NULL);
     uint64_t cr3, cr4, lstar;
     if (!regs || regs_get(regs, "cr3", &cr3) || regs_get(regs, "cr4", &cr4) || regs_get(regs, "lstar", &lstar)) {

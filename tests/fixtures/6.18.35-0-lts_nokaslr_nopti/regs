@@ -1,6 +1,7 @@
-cr3=0x19108004
+cr3=0x19070001
 cr4=0x772ef0
 rip=0xffffffff81fd5e1f
 cpl=0
 efer=0xd01
 lstar=0xffffffff81000080
+idtr=0xfffffe0000000000

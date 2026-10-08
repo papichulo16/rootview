@@ -1,1 +1,2 @@
-not captured (collected before collect.py grepped dmesg); booted with pti=on and paused at CPL=3 with CR3 bit 12 set
+[    0.006157] Kernel/User page tables isolation: force enabled on command line.
+[    0.043367] Kernel/User page tables isolation: enabled
