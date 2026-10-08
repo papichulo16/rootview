@@ -11,6 +11,7 @@
 #include "kern/prof/kfield.h"
 #include "kern/prof/kprof.h"
 #include "kern/prof/kprof_vmi.h"
+#include "kern/prof/kwalk.h"
 #include "vmi/vmi.h"
 #include "vmi/vmi_reg_names.h"
 
@@ -456,53 +457,37 @@ static void cmd_tasks(prof_state_t *ps) {
         return;
     }
     const kprof_t *kp = &ps->kp;
-    char err[256];
-    kfield_t f_next, f_pid, f_comm;
-    if (kfield_resolve(&kp->btf, "task_struct", "tasks.next", &f_next, err, sizeof(err)) != 0 ||
+    char err[512];
+    kfield_t f_tasks, f_pid, f_comm;
+    if (kfield_resolve(&kp->btf, "task_struct", "tasks", &f_tasks, err, sizeof(err)) != 0 ||
         kfield_resolve(&kp->btf, "task_struct", "pid", &f_pid, err, sizeof(err)) != 0 ||
         kfield_resolve(&kp->btf, "task_struct", "comm", &f_comm, err, sizeof(err)) != 0) {
         printf("error: %s\n", err);
         return;
     }
-    /* the fields sit near each other; one read spans them */
-    uint64_t lo = f_next.offset, hi = f_next.offset + f_next.size;
-    const kfield_t *fs[] = {&f_pid, &f_comm};
-    for (size_t i = 0; i < 2; i++) {
-        if (fs[i]->offset < lo) lo = fs[i]->offset;
-        if (fs[i]->offset + fs[i]->size > hi) hi = fs[i]->offset + fs[i]->size;
-    }
-    unsigned char buf[DUMP_MAX];
-    if (hi - lo > sizeof(buf)) {
-        printf("error: task_struct fields span %" PRIu64 " bytes\n", hi - lo);
-        return;
-    }
-    kfield_t rel[3] = {f_next, f_pid, f_comm};
-    for (size_t i = 0; i < 3; i++) rel[i].offset -= lo;
 
-    if (kprof_pause(kp, err, sizeof(err)) != 0) {
+    /* one pause window: the list and every task read from one cache */
+    static uint64_t tasks[65536];
+    size_t n = 0;
+    kwalk_t w;
+    kwalk_init(&w, kp, 0);
+    if (kwalk_begin(&w, err, sizeof(err)) != 0) {
         printf("error: %s\n", err);
         return;
     }
+    if (kwalk_list(&w, kp->init_task + f_tasks.offset, "task_struct", "tasks", tasks, 65536, &n, err, sizeof(err)) != 0)
+        printf("error: %s (after %zu tasks)\n", err, n);
     printf("%7s  %s\n", "PID", "COMM");
-    uint64_t task = kp->init_task;
-    size_t n = 0;
-    for (; n < 1000000; n++) {
-        kval_t next, pid, comm;
-        if (kprof_read(kp, task + lo, buf, hi - lo, err, sizeof(err)) != 0) {
-            printf("error: task 0x%016" PRIx64 ": %s\n", task, err);
-            break;
-        }
-        kfield_decode(&kp->btf, &rel[0], buf, hi - lo, &next, NULL, 0);
-        if (task != kp->init_task) {
-            kfield_decode(&kp->btf, &rel[1], buf, hi - lo, &pid, NULL, 0);
-            kfield_decode(&kp->btf, &rel[2], buf, hi - lo, &comm, NULL, 0);
-            printf("%7" PRId64 "  %s\n", pid.s, (const char *) comm.bytes);
-            kval_free(&comm);
-        }
-        task = next.u - f_next.offset;
-        if (task == kp->init_task) break;
+    for (size_t i = 0; i < n; i++) {
+        int32_t pid = 0;
+        char comm[17] = "";
+        kwalk_iov_t iov[2] = {{tasks[i] + f_pid.offset, &pid, sizeof(pid), 0},
+                              {tasks[i] + f_comm.offset, comm, 16, 0}};
+        if (kwalk_read_many(&w, iov, 2, err, sizeof(err)) != 0) printf("%7s  (0x%016" PRIx64 ": %s)\n", "?", tasks[i], err);
+        else printf("%7" PRId32 "  %s\n", pid, comm);
     }
-    if (kprof_resume(kp, err, sizeof(err)) != 0) printf("error: %s\n", err);
+    if (kwalk_end(&w, err, sizeof(err)) != 0) printf("error: %s\n", err);
+    kwalk_free(&w);
 }
 
 static void cmd_field(prof_state_t *ps, const char *args) {

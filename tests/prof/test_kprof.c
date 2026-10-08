@@ -187,29 +187,6 @@ static void test_fixture_kfield(const char *dir, const char *name) {
 /* ---- the init sequence over a dump ---- */
 
 typedef struct {
-    kprof_regs_t regs;
-    int pauses, resumes;
-} dump_ctx_t;
-
-static int dump_pause(void *ctx, char *err, size_t err_len) {
-    (void) err, (void) err_len;
-    ((dump_ctx_t *) ctx)->pauses++;
-    return 0;
-}
-
-static int dump_resume(void *ctx, char *err, size_t err_len) {
-    (void) err, (void) err_len;
-    ((dump_ctx_t *) ctx)->resumes++;
-    return 0;
-}
-
-static int dump_regs(void *ctx, kprof_regs_t *regs, char *err, size_t err_len) {
-    (void) err, (void) err_len;
-    *regs = ((dump_ctx_t *) ctx)->regs;
-    return 0;
-}
-
-typedef struct {
     int pid;
     char comm[64];
 } task_t;

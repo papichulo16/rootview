@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 
 #include "kern/prof/kmem.h"
+#include "kern/prof/kprof.h"
 #include "kern/prof/pt.h"
 
 static int failures;
@@ -114,6 +115,59 @@ __attribute__((unused)) static int fixture_open(const char *dir, const char *nam
     }
     if (regs_out) *regs_out = regs;
     else free(regs);
+    return 0;
+}
+
+/* a kprof_target_t over a dump: pause and resume only count, and the
+ * registers come from the fixture's regs file */
+typedef struct {
+    kprof_regs_t regs;
+    int pauses, resumes;
+} dump_ctx_t;
+
+__attribute__((unused)) static int dump_pause(void *ctx, char *err, size_t err_len) {
+    (void) err, (void) err_len;
+    ((dump_ctx_t *) ctx)->pauses++;
+    return 0;
+}
+
+__attribute__((unused)) static int dump_resume(void *ctx, char *err, size_t err_len) {
+    (void) err, (void) err_len;
+    ((dump_ctx_t *) ctx)->resumes++;
+    return 0;
+}
+
+__attribute__((unused)) static int dump_regs(void *ctx, kprof_regs_t *regs, char *err, size_t err_len) {
+    (void) err, (void) err_len;
+    *regs = ((dump_ctx_t *) ctx)->regs;
+    return 0;
+}
+
+/* opens the dump and runs kprof_init over it, as test_kprof checks in
+ * full. ctx and target must outlive kp; kmem_close(&target->mem) after. */
+__attribute__((unused)) static int fixture_kprof(const char *dir, const char *name, dump_ctx_t *ctx,
+                                                 kprof_target_t *target, kprof_t *kp) {
+    char *regs = fixture_file(dir, name, "regs", NULL);
+    *ctx = (dump_ctx_t) {0};
+    if (!regs || regs_get(regs, "cr3", &ctx->regs.cr3) || regs_get(regs, "cr4", &ctx->regs.cr4) ||
+        regs_get(regs, "lstar", &ctx->regs.lstar) || regs_get(regs, "idtr", &ctx->regs.idtr_base)) {
+        CHECK(0, "bad regs for %s", name);
+        free(regs);
+        return -1;
+    }
+    free(regs);
+    char path[4096], err[512];
+    *target = (kprof_target_t) {.pause = dump_pause, .resume = dump_resume, .read_regs = dump_regs, .ctx = ctx};
+    snprintf(path, sizeof(path), "%s/%s/mem.raw", dir, name);
+    if (kmem_dump_open(path, &target->mem, err, sizeof(err)) != 0) {
+        CHECK(0, "%s", err);
+        return -1;
+    }
+    if (kprof_init(kp, target, err, sizeof(err)) != 0) {
+        CHECK(0, "kprof_init: %s", err);
+        kmem_close(&target->mem);
+        return -1;
+    }
     return 0;
 }
 
