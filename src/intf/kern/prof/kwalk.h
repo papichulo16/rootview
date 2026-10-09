@@ -89,6 +89,21 @@ int kwalk_list(kwalk_t *w, uint64_t head, const char *type, const char *member, 
 int kwalk_hlist(kwalk_t *w, uint64_t head, const char *type, const char *member, uint64_t *out, size_t max, size_t *n,
                 char *err, size_t err_len);
 
+/* kwalk_list and kwalk_hlist with the link's offset in its container given
+ * directly, for links BTF can't name as a plain member (pid_links[0]) */
+int kwalk_list_off(kwalk_t *w, uint64_t head, uint64_t off, uint64_t *out, size_t max, size_t *n, char *err,
+                   size_t err_len);
+int kwalk_hlist_off(kwalk_t *w, uint64_t head, uint64_t off, uint64_t *out, size_t max, size_t *n, char *err,
+                    size_t err_len);
+
+/* the rb_nodes of the rb_root at root, in order (leftmost first): out gets
+ * each struct rb_node's own address, and the caller subtracts the node's
+ * offset in its container. every child has to name its parent in
+ * __rb_parent_color, and the tree can be no deeper than an rb-tree of max
+ * nodes could be, so a cycle or a hand-built list can't pass as a tree. */
+#define KWALK_RB_MAX_DEPTH 96
+int kwalk_rbtree(kwalk_t *w, uint64_t root, uint64_t *out, size_t max, size_t *n, char *err, size_t err_len);
+
 /* cpu's copy of the per-cpu variable sym: sym's address plus
  * __per_cpu_offset[cpu]. cpu has to be below nr_cpu_ids. */
 int kwalk_percpu_addr(kwalk_t *w, const char *sym, unsigned cpu, uint64_t *addr, char *err, size_t err_len);

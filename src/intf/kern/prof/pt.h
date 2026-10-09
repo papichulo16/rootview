@@ -36,6 +36,15 @@ int pt_translate(const kmem_t *mem, const pt_root_t *root, uint64_t va, uint64_t
 /* reads len bytes at va, re-translating at every page boundary */
 int pt_read(const kmem_t *mem, const pt_root_t *root, uint64_t va, void *buf, size_t len, char *err, size_t err_len);
 
+/* calls fn for each present leaf mapping overlapping [start, end) under
+ * root, in address order: va and pa of the page (4KiB, 2MiB or 1GiB), and
+ * whether it's NX at any level. fn returns nonzero to stop the walk, which
+ * pt_for_each_page then returns. 4-level paging only; max_pages caps how
+ * many leaves are visited (-1 with err when it runs out). */
+typedef int (*pt_page_fn)(uint64_t va, uint64_t pa, uint64_t size, bool nx, void *ctx);
+int pt_for_each_page(const kmem_t *mem, const pt_root_t *root, uint64_t start, uint64_t end, size_t max_pages,
+                     pt_page_fn fn, void *ctx, char *err, size_t err_len);
+
 /* the kernel image mapping: PDPT[510] of PML4[511], 0xffffffff80000000 up */
 #define PT_KIMG_BASE 0xffffffff80000000ull
 

@@ -5,6 +5,7 @@
 
 #define PTE_PRESENT (1ull << 0)
 #define PTE_PS (1ull << 7)
+#define PTE_NX (1ull << 63)
 
 static bool is_canonical(uint64_t va, bool la57) {
     int bits = la57 ? 57 : 48;
@@ -59,4 +60,54 @@ int pt_read(const kmem_t *mem, const pt_root_t *root, uint64_t va, void *buf, si
         done += chunk;
     }
     return 0;
+}
+
+typedef struct {
+    const kmem_t *mem;
+    uint64_t start, end;
+    size_t left;
+    pt_page_fn fn;
+    void *ctx;
+    char *err;
+    size_t err_len;
+} pages_t;
+
+/* table: physical address of a level-`level` table mapping va_base up */
+static int pages_level(pages_t *p, uint64_t table, int level, uint64_t va_base, bool nx) {
+    int shift = 12 + 9 * (level - 1);
+    uint64_t span = 1ull << shift;
+    uint64_t ents[512];
+    if (kmem_read_pa(p->mem, table & PT_PA_MASK, ents, sizeof(ents), p->err, p->err_len) != 0) return -1;
+    for (unsigned i = 0; i < 512; i++) {
+        uint64_t va = va_base + i * span;
+        if (level == 4) va = (uint64_t) ((int64_t) (va << 16) >> 16); /* sign-extend bit 47 */
+        uint64_t last = va + span - 1;
+        if (last < p->start || va >= p->end) continue;
+        uint64_t e = ents[i];
+        if (!(e & PTE_PRESENT)) continue;
+        bool enx = nx || (e & PTE_NX);
+        if (level == 1 || ((level == 2 || level == 3) && (e & PTE_PS))) {
+            if (p->left == 0) {
+                if (p->err) snprintf(p->err, p->err_len, "more than the page cap under 0x%016" PRIx64, p->start);
+                return -1;
+            }
+            p->left--;
+            int rc = p->fn(va, e & PT_PA_MASK & ~(span - 1), span, enx, p->ctx);
+            if (rc) return rc;
+            continue;
+        }
+        int rc = pages_level(p, e, level - 1, va, enx);
+        if (rc) return rc;
+    }
+    return 0;
+}
+
+int pt_for_each_page(const kmem_t *mem, const pt_root_t *root, uint64_t start, uint64_t end, size_t max_pages,
+                     pt_page_fn fn, void *ctx, char *err, size_t err_len) {
+    if (root->la57) {
+        if (err) snprintf(err, err_len, "5-level paging isn't supported");
+        return -1;
+    }
+    pages_t p = {mem, start, end, max_pages, fn, ctx, err, err_len};
+    return pages_level(&p, root->pgd, 4, 0, false);
 }

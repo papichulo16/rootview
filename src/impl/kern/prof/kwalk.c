@@ -250,24 +250,130 @@ out:
     return rc;
 }
 
-int kwalk_list(kwalk_t *w, uint64_t head, const char *type, const char *member, uint64_t *out, size_t max, size_t *n,
-               char *err, size_t err_len) {
+int kwalk_list_off(kwalk_t *w, uint64_t head, uint64_t off, uint64_t *out, size_t max, size_t *n, char *err,
+                   size_t err_len) {
     *n = 0;
-    uint64_t off, first;
-    if (link_member(w, type, member, "list_head", &off, err, err_len) != 0) return -1;
+    uint64_t first;
     if (!kwalk_kernel_va(head)) FAIL("list head 0x%016" PRIx64 " is not a kernel address", head);
     if (read_u64(w, head, &first, err, err_len) != 0) return -1;
     return walk_links(w, head, first, head, off, out, max, n, err, err_len);
 }
 
-int kwalk_hlist(kwalk_t *w, uint64_t head, const char *type, const char *member, uint64_t *out, size_t max, size_t *n,
-                char *err, size_t err_len) {
+int kwalk_hlist_off(kwalk_t *w, uint64_t head, uint64_t off, uint64_t *out, size_t max, size_t *n, char *err,
+                    size_t err_len) {
     *n = 0;
-    uint64_t off, first;
-    if (link_member(w, type, member, "hlist_node", &off, err, err_len) != 0) return -1;
+    uint64_t first;
     if (!kwalk_kernel_va(head)) FAIL("hlist head 0x%016" PRIx64 " is not a kernel address", head);
     if (read_u64(w, head, &first, err, err_len) != 0) return -1;
     return walk_links(w, head, first, 0, off, out, max, n, err, err_len);
+}
+
+int kwalk_list(kwalk_t *w, uint64_t head, const char *type, const char *member, uint64_t *out, size_t max, size_t *n,
+               char *err, size_t err_len) {
+    *n = 0;
+    uint64_t off;
+    if (link_member(w, type, member, "list_head", &off, err, err_len) != 0) return -1;
+    return kwalk_list_off(w, head, off, out, max, n, err, err_len);
+}
+
+int kwalk_hlist(kwalk_t *w, uint64_t head, const char *type, const char *member, uint64_t *out, size_t max, size_t *n,
+                char *err, size_t err_len) {
+    *n = 0;
+    uint64_t off;
+    if (link_member(w, type, member, "hlist_node", &off, err, err_len) != 0) return -1;
+    return kwalk_hlist_off(w, head, off, out, max, n, err, err_len);
+}
+
+/* ---- rb-tree ---- */
+
+/* struct rb_node: __rb_parent_color, rb_right, rb_left. the layout hasn't
+ * moved since 2.6.x, but it's checked against BTF anyway. */
+typedef struct {
+    uint64_t parent_color, right, left;
+} rb_raw_t;
+
+static int rb_layout(kwalk_t *w, char *err, size_t err_len) {
+    const btf_t *b = &w->kp->btf;
+    kfield_t pc, r, l;
+    if (kfield_resolve(b, "rb_node", "__rb_parent_color", &pc, err, err_len) != 0 ||
+        kfield_resolve(b, "rb_node", "rb_right", &r, err, err_len) != 0 ||
+        kfield_resolve(b, "rb_node", "rb_left", &l, err, err_len) != 0)
+        return -1;
+    if (pc.offset != 0 || r.offset != 8 || l.offset != 16) FAIL("struct rb_node isn't {parent_color, right, left}");
+    return 0;
+}
+
+int kwalk_rbtree(kwalk_t *w, uint64_t root, uint64_t *out, size_t max, size_t *n, char *err, size_t err_len) {
+    *n = 0;
+    max = clamp_max(max);
+    if (rb_layout(w, err, err_len) != 0) return -1;
+    if (!kwalk_kernel_va(root)) FAIL("rb_root 0x%016" PRIx64 " is not a kernel address", root);
+    uint64_t top;
+    if (read_u64(w, root, &top, err, err_len) != 0) return -1;
+    if (!top) return 0;
+
+    walk_t s;
+    if (walk_start(&s, w, max, err, err_len) != 0) return -1;
+    /* iterative in-order: stack[i] is a node whose left subtree is being
+     * walked, and parent[] what each must name as its parent */
+    struct {
+        uint64_t node;
+        rb_raw_t raw;
+    } stack[KWALK_RB_MAX_DEPTH];
+    int depth = 0, rc = -1;
+    uint64_t node = top, parent = 0;
+    char e[200];
+    for (;;) {
+        while (node) {
+            if (!kwalk_kernel_va(node)) {
+                if (err) snprintf(err, err_len, "rb_root 0x%016" PRIx64 ": node 0x%016" PRIx64
+                                  " is not a kernel address", root, node);
+                goto out;
+            }
+            if (!walk_visit(&s, node)) {
+                if (err) snprintf(err, err_len, "rb_root 0x%016" PRIx64 ": node 0x%016" PRIx64 " reached twice",
+                                  root, node);
+                goto out;
+            }
+            if (depth == KWALK_RB_MAX_DEPTH) {
+                if (err) snprintf(err, err_len, "rb_root 0x%016" PRIx64 ": deeper than %d", root,
+                                  KWALK_RB_MAX_DEPTH);
+                goto out;
+            }
+            if (walk_over_budget(&s)) {
+                if (err) snprintf(err, err_len, "rb_root 0x%016" PRIx64 ": %u ms budget ran out after %zu nodes",
+                                  root, s.budget_ms, *n);
+                goto out;
+            }
+            rb_raw_t raw;
+            if (kwalk_read(w, node, &raw, sizeof(raw), e, sizeof(e)) != 0) {
+                if (err) snprintf(err, err_len, "rb_root 0x%016" PRIx64 ": node 0x%016" PRIx64 ": %s", root, node, e);
+                goto out;
+            }
+            if ((raw.parent_color & ~3ull) != parent) {
+                if (err) snprintf(err, err_len, "rb_root 0x%016" PRIx64 ": node 0x%016" PRIx64 " names parent 0x%016"
+                                  PRIx64 ", reached from 0x%016" PRIx64, root, node, (uint64_t) (raw.parent_color & ~3ull), parent);
+                goto out;
+            }
+            stack[depth].node = node;
+            stack[depth++].raw = raw;
+            parent = node;
+            node = raw.left;
+        }
+        if (!depth) break;
+        depth--;
+        if (*n == max) {
+            if (err) snprintf(err, err_len, "rb_root 0x%016" PRIx64 ": more than %zu nodes", root, max);
+            goto out;
+        }
+        out[(*n)++] = stack[depth].node;
+        parent = stack[depth].node;
+        node = stack[depth].raw.right;
+    }
+    rc = 0;
+out:
+    walk_end(&s);
+    return rc;
 }
 
 /* ---- per-cpu ---- */
