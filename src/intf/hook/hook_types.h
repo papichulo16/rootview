@@ -11,6 +11,11 @@
 
 #define HOOK_NAME_MAX 64
 #define HOOK_MAX 64
+#define HOOK_MAX_VCPUS 64
+
+/* the bytes a write-capturing mem hook keeps around the written address:
+ * a 16-byte-aligned window, before and after the write */
+#define HOOK_MEM_WINDOW 16
 
 /* sentinel cpuid_leaf value meaning "match every leaf" */
 #define HOOK_CPUID_ANY_LEAF UINT32_MAX
@@ -37,7 +42,8 @@ typedef enum {
  *   HOOK_KIND_REGISTER:   old_value, new_value
  *   HOOK_KIND_CPUID:      cpuid_leaf, cpuid_subleaf
  *   HOOK_KIND_DESCRIPTOR: descriptor, desc_is_write
- *   HOOK_KIND_MEM:        mem_gpa, mem_access */
+ *   HOOK_KIND_MEM:        mem_gpa, mem_access, rip; and with capture,
+ *                         mem_window, mem_before, mem_after */
 typedef struct {
     hook_kind_t kind;
     const char *name;
@@ -55,6 +61,18 @@ typedef struct {
 
     uint64_t mem_gpa;
     uint8_t mem_access; /* VMI_MEMACCESS_* bits that fired */
+    uint64_t rip;       /* the faulting instruction */
+
+    /* a write-capturing mem hook (hook_mem_add_gfn with capture): the
+     * window's guest-physical address and its bytes as the write event
+     * fired, and after the vcpu stepped over the writing instruction.
+     * mem_after_ok is false when the step couldn't be had, and mem_after
+     * is then a copy of mem_before. */
+    bool mem_captured;
+    bool mem_after_ok;
+    uint64_t mem_window;
+    uint8_t mem_before[HOOK_MEM_WINDOW];
+    uint8_t mem_after[HOOK_MEM_WINDOW];
 } hook_event_t;
 
 typedef void (*hook_callback_t)(const hook_event_t *ev, void *user_data);
@@ -81,6 +99,8 @@ typedef struct hook {
 
     uint64_t mem_gfn;   /* HOOK_KIND_MEM: guest frame number being watched */
     uint8_t mem_access; /* HOOK_KIND_MEM: VMI_MEMACCESS_* mask being watched */
+    bool mem_capture;   /* HOOK_KIND_MEM: capture writes' before/after bytes */
+    void *mgr;          /* HOOK_KIND_MEM: the hook_manager_t that owns it, for the capture */
 
     hook_callback_t callback;
     void *user_data;
@@ -95,8 +115,18 @@ typedef struct {
 
     bool bp_active;
     vmi_event_t bp_event;
-    vmi_event_t ss_event;
     hook_t *pending_bp; /* hook mid-recoil, if any */
+
+    /* KVMI allows one single-step registration, so breakpoint recoil and
+     * mem write capture share it: whichever is pending on the vcpu that
+     * stepped gets the event */
+    bool ss_active;
+    vmi_event_t ss_event;
+    struct {
+        bool active;
+        hook_t *hook;
+        hook_event_t ev; /* everything but mem_after, filled at the write */
+    } mem_pending[HOOK_MAX_VCPUS];
 
     bool cpuid_active;
     vmi_event_t cpuid_event;

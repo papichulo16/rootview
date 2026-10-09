@@ -38,22 +38,18 @@ static event_response_t on_bp_hit(vmi_instance_t vmi, vmi_event_t *event) {
     return VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP;
 }
 
-static event_response_t on_bp_singlestep(vmi_instance_t vmi, vmi_event_t *event) {
-    (void) vmi;
-    hook_manager_t *mgr = (hook_manager_t *) event->data;
-
+void hook_bp_stepped(hook_manager_t *mgr) {
     hook_t *h = mgr->pending_bp;
-    if (h) {
-        unsigned char cc = 0xcc;
-        char err[128];
-        vmi_write_virt(mgr->session, h->vaddr, &cc, 1, err, sizeof(err));
-        mgr->pending_bp = NULL;
-    }
-    return VMI_EVENT_RESPONSE_TOGGLE_SINGLESTEP;
+    if (!h) return;
+    unsigned char cc = 0xcc;
+    char err[128];
+    vmi_write_virt(mgr->session, h->vaddr, &cc, 1, err, sizeof(err));
+    mgr->pending_bp = NULL;
 }
 
 /* KVMI allows only one INT3 registration at a time, so every breakpoint
- * hook shares this one bp_event/ss_event pair. */
+ * hook shares this one bp_event, and the manager's single-step event for
+ * the recoil. */
 static int ensure_bp_infra(hook_manager_t *mgr, char *err, size_t err_len) {
     if (mgr->bp_active) return 0;
 
@@ -69,17 +65,7 @@ static int ensure_bp_infra(hook_manager_t *mgr, char *err, size_t err_len) {
         return -1;
     }
 
-    memset(&mgr->ss_event, 0, sizeof(mgr->ss_event));
-    mgr->ss_event.version = VMI_EVENTS_VERSION;
-    mgr->ss_event.type = VMI_EVENT_SINGLESTEP;
-    mgr->ss_event.callback = on_bp_singlestep;
-    mgr->ss_event.data = mgr;
-    mgr->ss_event.ss_event.enable = false;
-    unsigned int num_vcpus = vmi_get_num_vcpus(mgr->session->vmi);
-    for (unsigned int vcpu = 0; vcpu < num_vcpus; vcpu++) SET_VCPU_SINGLESTEP(mgr->ss_event.ss_event, vcpu);
-
-    if (vmi_register_event(mgr->session->vmi, &mgr->ss_event) != VMI_SUCCESS) {
-        if (err) snprintf(err, err_len, "failed to set up single-step recoil for breakpoints");
+    if (hook_ss_ensure(mgr, err, err_len) != 0) {
         vmi_clear_event(mgr->session->vmi, &mgr->bp_event, NULL);
         return -1;
     }

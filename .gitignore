@@ -1,5 +1,6 @@
 rv
 build/obj/
+build/pic/
 .rootview/
 
 .gdb_history

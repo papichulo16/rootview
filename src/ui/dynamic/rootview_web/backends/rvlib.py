@@ -28,6 +28,8 @@ ERR_MAX = 512
 NAME_MAX = 64
 COMM_MAX = 16
 EVENTS_MAX = 4096
+SYM_MAX = 128
+WINDOW = 16
 
 #: Node cap for list and idr walks; the C side clamps it to 1M.
 WALK_MAX = 65536
@@ -114,6 +116,21 @@ class _Event(ctypes.Structure):
         ("desc_is_write", ctypes.c_int),
         ("mem_gpa", ctypes.c_uint64),
         ("mem_access", ctypes.c_uint32),
+        ("rip", ctypes.c_uint64),
+        ("rip_sym", ctypes.c_char * SYM_MAX),
+        ("rip_off", ctypes.c_uint64),
+        ("captured", ctypes.c_int),
+        ("after_ok", ctypes.c_int),
+        ("window", ctypes.c_uint64),
+        ("before", ctypes.c_uint8 * WINDOW),
+        ("after", ctypes.c_uint8 * WINDOW),
+        ("watch", ctypes.c_int),
+        ("slot", ctypes.c_int64),
+        ("slot_va", ctypes.c_uint64),
+        ("old_sym", ctypes.c_char * SYM_MAX),
+        ("new_sym", ctypes.c_char * SYM_MAX),
+        ("old_off", ctypes.c_uint64),
+        ("new_off", ctypes.c_uint64),
     ]
 
 
@@ -121,6 +138,8 @@ class _Event(ctypes.Structure):
 KINDS = ("u", "s", "ptr", "bytes", "cstr", "enum")
 #: rv_event_t's kind, by value (RV_HOOK_*).
 HOOK_KINDS = ("register", "breakpoint", "cpuid", "descriptor", "mem")
+#: rv_event_t's watch, by value (RV_WATCH_*): which table rv_watch_tables' hook fired on.
+WATCH_TABLES = (None, "sys_call_table", "idt")
 
 
 @dataclass(frozen=True)
@@ -194,6 +213,27 @@ class HookEvent:
     desc_is_write: bool
     mem_gpa: int
     mem_access: int
+    #: mem: the faulting instruction, and its kallsyms name ("" outside the core image).
+    rip: int = 0
+    rip_sym: str = ""
+    rip_off: int = 0
+    #: mem with write capture: the 16-byte window's gpa and bytes before and after
+    #: the write. ``after_ok`` False means the step never came and ``after`` is ``before``.
+    captured: bool = False
+    after_ok: bool = False
+    window: int = 0
+    before: bytes = b""
+    after: bytes = b""
+    #: a watched table's write (Guest.watch_tables): the table, the slot it hit
+    #: (syscall nr or vector, -1 outside the table) and the slot's target before
+    #: and after - in ``old_value`` / ``new_value`` - by name.
+    watch: str | None = None
+    slot: int = -1
+    slot_va: int = 0
+    old_sym: str = ""
+    old_off: int = 0
+    new_sym: str = ""
+    new_off: int = 0
 
 
 def _text(raw: bytes) -> str:
@@ -239,6 +279,8 @@ def _load(path: str | os.PathLike | None = None) -> ctypes.CDLL:
         "rv_hook_remove": (status, (h, c.c_char_p, *err)),
         "rv_hook_poll": (status, (h, c.c_uint32, *err)),
         "rv_events": (status, (h, c.POINTER(_Event), c.c_size_t, size_p, u64_p, *err)),
+        "rv_watch_tables": (status, (h, *err)),
+        "rv_unwatch_tables": (status, (h, *err)),
     }
     for name, (restype, argtypes) in sigs.items():
         fn = getattr(lib, name)
@@ -441,6 +483,20 @@ class Guest:
         """Trap ``access`` (any of r, w, x) to the page holding ``va``."""
         _call(self._lib.rv_hook_mem, self.handle, name.encode(), va, access.encode())
 
+    def watch_tables(self) -> None:
+        """Write-protect the frames under sys_call_table and the IDT.
+
+        Each write then arrives through poll()/events() as a ``mem`` event with
+        ``watch`` set, the slot it hit, the slot's target before and after, and
+        the rip that wrote it. This catches the moment of patching; keep the
+        periodic table and hash scans as well, since a table already patched
+        before this call raises no event.
+        """
+        _call(self._lib.rv_watch_tables, self.handle)
+
+    def unwatch_tables(self) -> None:
+        _call(self._lib.rv_unwatch_tables, self.handle)
+
     def hook_remove(self, name: str) -> None:
         _call(self._lib.rv_hook_remove, self.handle, name.encode())
 
@@ -473,6 +529,21 @@ class Guest:
                 bool(e.desc_is_write),
                 e.mem_gpa,
                 e.mem_access,
+                e.rip,
+                _text(e.rip_sym),
+                e.rip_off,
+                bool(e.captured),
+                bool(e.after_ok),
+                e.window,
+                bytes(e.before),
+                bytes(e.after),
+                WATCH_TABLES[e.watch] if 0 <= e.watch < len(WATCH_TABLES) else str(e.watch),
+                e.slot,
+                e.slot_va,
+                _text(e.old_sym),
+                e.old_off,
+                _text(e.new_sym),
+                e.new_off,
             )
             for e in out[: n.value]
         ], dropped.value

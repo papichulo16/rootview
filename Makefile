@@ -39,10 +39,11 @@ clean:
 TEST_DIR := build/test
 TEST_CFLAGS := -Wall -Wextra -O2 -g -I$(INTF_DIR)
 PROF_CORE := $(addprefix $(IMPL_DIR)/kern/prof/,kmem_dump.c pt_root.c pt_walk.c pt_image.c ksym.c btf.c kprof.c kfield.c kwalk.c)
-PROF_TESTS := test_pt test_ksym test_btf test_kprof test_kwalk test_kscan test_khash test_kcheck
+PROF_TESTS := test_pt test_ksym test_btf test_kprof test_kwalk test_kscan test_khash test_kcheck test_kwatch
 PROF_SCAN := $(wildcard $(IMPL_DIR)/kern/prof/scan/*.c)
 PROF_KHASH := $(wildcard $(IMPL_DIR)/kern/prof/khash/*.c)
 PROF_KCHECK := $(wildcard $(IMPL_DIR)/kern/prof/kcheck/*.c)
+PROF_KWATCH := $(wildcard $(IMPL_DIR)/kern/prof/kwatch/*.c)
 
 test: $(addprefix $(TEST_DIR)/,$(PROF_TESTS))
 	./$(TEST_DIR)/test_pt tests/fixtures
@@ -53,6 +54,7 @@ test: $(addprefix $(TEST_DIR)/,$(PROF_TESTS))
 	./$(TEST_DIR)/test_kscan tests/fixtures
 	./$(TEST_DIR)/test_khash tests/fixtures
 	./$(TEST_DIR)/test_kcheck tests/fixtures
+	./$(TEST_DIR)/test_kwatch tests/fixtures
 
 $(TEST_DIR)/test_%: tests/prof/test_%.c tests/prof/fixture.h $(PROF_CORE)
 	mkdir -p $(dir $@)
@@ -67,6 +69,10 @@ $(TEST_DIR)/test_khash: tests/prof/test_khash.c tests/prof/fixture.h $(PROF_CORE
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
 $(TEST_DIR)/test_kcheck: tests/prof/test_kcheck.c tests/prof/fixture.h $(PROF_CORE) $(PROF_SCAN) $(PROF_KCHECK) $(IMPL_DIR)/kern/prof/kcheck/kcheck_priv.h
+	mkdir -p $(dir $@)
+	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
+
+$(TEST_DIR)/test_kwatch: tests/prof/test_kwatch.c tests/prof/fixture.h $(PROF_CORE) $(PROF_KWATCH)
 	mkdir -p $(dir $@)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
