@@ -1,8 +1,9 @@
 /* kscan tests: the object table on its own (dedup by address, bits from
  * several sources, rehashing), then kscan_tasks over each fixture with a
  * mem.raw - every source runs, agrees with ps and with each other - and
- * again with one task unlinked from init_task.tasks the way a rootkit does
- * it, which has to leave the same address found by every other source. */
+ * again with one task hidden the way a rootkit does it: unlinked from
+ * init_task.tasks, from its struct pid, and from both. each time exactly
+ * that address loses exactly those bits, and every other task is as it was. */
 #include <inttypes.h>
 
 #include "../../src/impl/kern/prof/scan/kscan_priv.h"
@@ -140,56 +141,118 @@ static void test_clean(kwalk_t *w, const int *pids, int npids, kscan_result_t *r
     printf("  %zu tasks\n", r->n);
 }
 
-/* list_del(&victim->tasks) by patching prev->next and next->prev */
-static void test_hidden(kprof_t *kp, kwalk_t *w, const kscan_result_t *clean) {
-    char err[512];
-    kfield_t f;
-    if (kfield_resolve(&kp->btf, "task_struct", "tasks", &f, err, sizeof(err)) != 0) {
-        CHECK(0, "%s", err);
-        return;
-    }
-    /* a thread group leader other than init and swapper, found by every
-     * source but the runqueue */
-    const kscan_object_t *victim = NULL;
+/* ---- hiding a task, the way a rootkit does it, by patching the dump ---- */
+
+/* a thread group leader other than init and swapper, found by every source
+ * but the runqueue, or NULL */
+static const kscan_object_t *pick_victim(const kscan_result_t *clean) {
     uint32_t want = TASK_ALL & ~BIT(KSCAN_SRC_RUNQUEUE);
-    for (size_t i = 0; i < clean->n && !victim; i++) {
+    for (size_t i = 0; i < clean->n; i++) {
         const kscan_object_t *o = &clean->objs[i];
         if ((o->flags & KSCAN_TASK_LEADER) && !(o->flags & KSCAN_TASK_IDLE) && o->id > 1 &&
             (o->source_mask & want) == want)
-            victim = o;
+            return o;
     }
-    if (!victim) {
+    return NULL;
+}
+
+/* queues an 8-byte patch at va */
+static int patch(kprof_t *kp, overlay_t *o, uint64_t va, uint64_t val, char *err, size_t err_len) {
+    uint64_t pa;
+    if (pt_translate(&kp->target.mem, &kp->root, va, &pa, NULL, err, err_len) != 0) return -1;
+    o->patch[o->n].pa = pa;
+    o->patch[o->n++].val = val;
+    return 0;
+}
+
+static int off_of(kprof_t *kp, const char *type, const char *path, uint64_t *off, char *err, size_t err_len) {
+    kfield_t f;
+    if (kfield_resolve(&kp->btf, type, path, &f, err, err_len) != 0) return -1;
+    *off = f.offset;
+    return 0;
+}
+
+/* list_del(&task->tasks): prev->next = next, next->prev = prev */
+static int hide_from_list(kprof_t *kp, kwalk_t *w, uint64_t task, overlay_t *o, char *err, size_t err_len) {
+    uint64_t off, next, prev;
+    if (off_of(kp, "task_struct", "tasks", &off, err, err_len) != 0 ||
+        kwalk_read(w, task + off, &next, 8, err, err_len) != 0 ||
+        kwalk_read(w, task + off + 8, &prev, 8, err, err_len) != 0)
+        return -1;
+    return patch(kp, o, prev, next, err, err_len) != 0 || patch(kp, o, next + 8, prev, err, err_len) != 0 ? -1 : 0;
+}
+
+/* hlist_del(&task->pid_links[PIDTYPE_PID]) out of its struct pid's
+ * tasks[PIDTYPE_PID]: the pid stays in the idr, but no task hangs off it.
+ * a leader is the first (only) entry, so the head takes the link's next. */
+static int hide_from_idr(kprof_t *kp, kwalk_t *w, uint64_t task, overlay_t *o, char *err, size_t err_len) {
+    uint64_t off_tpid, off_links, off_ptasks, pid, first, next;
+    if (off_of(kp, "task_struct", "thread_pid", &off_tpid, err, err_len) != 0 ||
+        off_of(kp, "task_struct", "pid_links", &off_links, err, err_len) != 0 ||
+        off_of(kp, "pid", "tasks", &off_ptasks, err, err_len) != 0 ||
+        kwalk_read(w, task + off_tpid, &pid, 8, err, err_len) != 0 ||
+        kwalk_read(w, pid + off_ptasks, &first, 8, err, err_len) != 0 ||
+        kwalk_read(w, task + off_links, &next, 8, err, err_len) != 0)
+        return -1;
+    if (first != task + off_links) {
+        snprintf(err, err_len, "pid's first task is 0x%016" PRIx64 ", not this one", first);
+        return -1;
+    }
+    return patch(kp, o, pid + off_ptasks, next, err, err_len);
+}
+
+/* scans with o over the dump and checks that exactly the victim changed:
+ * it lost the bits in drop and nothing else, and every other object kept
+ * the mask it had in the clean scan */
+static void check_hidden(kprof_t *kp, kwalk_t *w, const kscan_result_t *clean, const kscan_object_t *victim,
+                         overlay_t *o, uint32_t drop, const char *what) {
+    char err[512];
+    kmem_t base = kp->target.mem;
+    o->base = base;
+    kp->target.mem = (kmem_t) {.read_pa = overlay_read, .ctx = o};
+    kscan_result_t r;
+    int rc = kscan_tasks(w, &r, err, sizeof(err));
+    kp->target.mem = base;
+    if (rc != 0) {
+        CHECK(0, "%s: kscan_tasks: %s", what, err);
+        return;
+    }
+    CHECK(r.ran_mask == TASK_ALL, "%s: ran_mask %#x", what, r.ran_mask);
+    CHECK(r.n == clean->n, "%s: %zu tasks, clean had %zu", what, r.n, clean->n);
+    const kscan_object_t *t = kscan_find(&r, KSCAN_TASK, victim->addr);
+    uint32_t want = victim->source_mask & ~drop;
+    CHECK(t && t->source_mask == want && t->id == victim->id, "%s: pid %" PRId64 " %s, mask %#x, want %#x", what,
+          victim->id, t ? "found" : "lost", t ? t->source_mask : 0, want);
+    size_t changed = 0;
+    for (size_t i = 0; i < clean->n; i++) {
+        const kscan_object_t *c = &clean->objs[i], *h = kscan_find(&r, KSCAN_TASK, c->addr);
+        if (c->addr != victim->addr && (!h || h->source_mask != c->source_mask)) changed++;
+    }
+    CHECK(!changed, "%s: %zu other tasks changed", what, changed);
+    printf("  %s: pid %" PRId64 " (%s) mask %#x -> %#x, %zu others unchanged\n", what, victim->id, victim->name,
+           victim->source_mask, t ? t->source_mask : 0, clean->n - 1 - changed);
+    kscan_free(&r);
+}
+
+static void test_hidden(kprof_t *kp, kwalk_t *w, const kscan_result_t *clean) {
+    const kscan_object_t *v = pick_victim(clean);
+    if (!v) {
         printf("  hide: SKIP (no task on every source)\n");
         return;
     }
-    uint64_t link = victim->addr + f.offset, next, prev, pa_prev_next, pa_next_prev;
-    if (kwalk_read(w, link, &next, 8, err, sizeof(err)) != 0 || kwalk_read(w, link + 8, &prev, 8, err, sizeof(err)) ||
-        pt_translate(&kp->target.mem, &kp->root, prev, &pa_prev_next, NULL, err, sizeof(err)) != 0 ||
-        pt_translate(&kp->target.mem, &kp->root, next + 8, &pa_next_prev, NULL, err, sizeof(err)) != 0) {
+    char err[512];
+    overlay_t list = {0}, idr = {0}, both = {0};
+    if (hide_from_list(kp, w, v->addr, &list, err, sizeof(err)) != 0 ||
+        hide_from_idr(kp, w, v->addr, &idr, err, sizeof(err)) != 0 ||
+        hide_from_list(kp, w, v->addr, &both, err, sizeof(err)) != 0 ||
+        hide_from_idr(kp, w, v->addr, &both, err, sizeof(err)) != 0) {
         CHECK(0, "hide: %s", err);
         return;
     }
-    uint64_t addr = victim->addr;
-    int64_t pid = victim->id;
-    char name[KSCAN_NAME_MAX];
-    snprintf(name, sizeof(name), "%s", victim->name);
-
-    overlay_t o = {.base = kp->target.mem, .patch = {{pa_prev_next, next}, {pa_next_prev, prev}}, .n = 2};
-    kp->target.mem = (kmem_t) {.read_pa = overlay_read, .ctx = &o};
-    kscan_result_t r;
-    if (kscan_tasks(w, &r, err, sizeof(err)) != 0) {
-        CHECK(0, "kscan_tasks (hidden): %s", err);
-    } else {
-        const kscan_object_t *t = kscan_find(&r, KSCAN_TASK, addr);
-        CHECK(r.ran_mask == TASK_ALL, "hidden: ran_mask %#x", r.ran_mask);
-        CHECK(r.n == clean->n, "hidden: %zu tasks, clean had %zu", r.n, clean->n);
-        CHECK(t && !(t->source_mask & BIT(KSCAN_SRC_TASK_LIST)) && (t->source_mask & BIT(KSCAN_SRC_PID_IDR)) &&
-                  (t->source_mask & BIT(KSCAN_SRC_CHILDREN)) && t->id == pid,
-              "hidden pid %" PRId64 ": %s, mask %#x", pid, t ? "found" : "lost", t ? t->source_mask : 0);
-        printf("  hid pid %" PRId64 " (%s) from the task list: mask %#x\n", pid, name, t ? t->source_mask : 0);
-        kscan_free(&r);
-    }
-    kp->target.mem = o.base;
+    check_hidden(kp, w, clean, v, &list, BIT(KSCAN_SRC_TASK_LIST), "off the task list");
+    check_hidden(kp, w, clean, v, &idr, BIT(KSCAN_SRC_PID_IDR), "out of the pid idr");
+    /* off both, it's still reached through its parent and its thread group */
+    check_hidden(kp, w, clean, v, &both, BIT(KSCAN_SRC_TASK_LIST) | BIT(KSCAN_SRC_PID_IDR), "off both");
 }
 
 static void test_fixture(const char *dir, const char *name) {
