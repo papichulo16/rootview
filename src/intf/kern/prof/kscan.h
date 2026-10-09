@@ -38,11 +38,14 @@ enum {
     KSCAN_SRC_THREADS = 4,   /* signal->thread_head of every task found by any source */
 };
 
-/* module sources */
+/* module sources. mod_tree is a latch tree: two rb-trees over the same
+ * nodes, kept identical, so each copy is a source of its own and a module
+ * erased from one is still in the other. */
 enum {
-    KSCAN_SRC_MOD_LIST = 0,  /* the modules list */
-    KSCAN_SRC_MOD_TREE = 1,  /* mod_tree's latch tree, by address */
-    KSCAN_SRC_MOD_CARVE = 2, /* struct module signatures in the module mapping: additive only */
+    KSCAN_SRC_MOD_LIST = 0,   /* the modules list */
+    KSCAN_SRC_MOD_TREE = 1,   /* mod_tree.root.tree[0], by address */
+    KSCAN_SRC_MOD_CARVE = 2,  /* struct module signatures in the module mapping: additive only */
+    KSCAN_SRC_MOD_TREE_1 = 3, /* mod_tree.root.tree[1] */
 };
 
 /* bpf sources: progs */
@@ -81,6 +84,7 @@ enum {
 /* module flags */
 #define KSCAN_MOD_NO_TEXT_SYMS (1u << 0) /* has text, but none of its kallsyms fall in it */
 #define KSCAN_MOD_BAD_KALLSYMS (1u << 1) /* mod->kallsyms unreadable or absurd */
+#define KSCAN_MOD_STRAY_NODE (1u << 2)   /* a mod_tree node naming it lies outside its struct module */
 
 /* prog flags */
 #define KSCAN_PROG_JITED (1u << 0)

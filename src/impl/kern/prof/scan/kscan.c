@@ -182,7 +182,7 @@ void kscan_set_free(kscan_set_t *s) {
 
 static const char *const NAMES[4][KSCAN_SOURCES] = {
     [KSCAN_TASK] = {"task_list", "pid_idr", "runqueue", "children", "threads"},
-    [KSCAN_MODULE] = {"module_list", "mod_tree", "carve"},
+    [KSCAN_MODULE] = {"module_list", "mod_tree", "carve", "mod_tree[1]"},
     [KSCAN_BPF_PROG] = {"prog_idr", "bpf_kallsyms", "bpf_tree", "prog_func", "map_idr", "used_maps"},
     [KSCAN_BPF_MAP] = {"prog_idr", "bpf_kallsyms", "bpf_tree", "prog_func", "map_idr", "used_maps"},
 };
