@@ -29,6 +29,9 @@ typedef struct {
     void *ctx;
 } kprof_target_t;
 
+/* khash's page-hash baseline (khash.h): NULL until khash_baseline */
+struct khash_baseline;
+
 typedef struct {
     kprof_target_t target; /* borrowed: kprof_free doesn't close it */
     kprof_regs_t regs;     /* as read at init */
@@ -41,6 +44,7 @@ typedef struct {
     char release[65]; /* "6.18.35-0-lts", what uname -r says */
     unsigned major, minor, patch;
     uint64_t init_task;
+    struct khash_baseline *hash; /* one allocation: kprof_free frees it */
 } kprof_t;
 
 /* the init sequence, each step's failure reported as "step N (what): ...":

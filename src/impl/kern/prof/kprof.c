@@ -2,6 +2,7 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "kern/prof/kfield.h"
@@ -206,6 +207,8 @@ void kprof_free(kprof_t *kp) {
     pt_image_free(&kp->img);
     ksym_free(&kp->ksym);
     btf_free(&kp->btf);
+    free(kp->hash);
+    kp->hash = NULL;
 }
 
 int kprof_read(const kprof_t *kp, uint64_t va, void *buf, size_t len, char *err, size_t err_len) {
