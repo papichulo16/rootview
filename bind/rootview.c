@@ -5,11 +5,10 @@
 #include <string.h>
 
 #include "hook/hook.h"
-#include "kern/prof/kfield.h"
-#include "kern/prof/kprof.h"
-#include "kern/prof/kprof_vmi.h"
-#include "kern/prof/kwalk.h"
-#include "kern/prof/kwatch.h"
+#include "kern/kfield.h"
+#include "kern/kprof.h"
+#include "kern/kwalk.h"
+#include "kern/kwatch.h"
 #include "vm/vm_config.h"
 #include "vm/vm_state.h"
 #include "vm/vm_store.h"
@@ -34,7 +33,6 @@ _Static_assert((int) RV_WATCH_SYSCALL == KWATCH_SYSCALL + 1 && (int) RV_WATCH_ID
 
 struct rv_handle {
     vmi_session_t session;
-    kprof_target_t target;
     kprof_t kp;
     kwalk_t w; /* every read goes through it, so a snapshot window caches them all */
     hook_manager_t hooks;
@@ -89,8 +87,7 @@ API rv_handle_t *rv_init(const char *vm_name, char *err, size_t err_len) {
         free(h);
         return NULL;
     }
-    kprof_vmi_target(&h->session, &h->target);
-    if (kprof_init(&h->kp, &h->target, err, err_len) != 0) {
+    if (kprof_init(&h->kp, &h->session, err, err_len) != 0) {
         vmi_detach(&h->session);
         free(h);
         return NULL;
@@ -411,7 +408,7 @@ API int rv_watch_tables(rv_handle_t *h, char *err, size_t err_len) {
     }
     kprof_regs_t regs;
     if (pause_for_hook(h, err, err_len) != 0) return -1;
-    int rc = h->target.read_regs(h->target.ctx, &regs, err, err_len);
+    int rc = kprof_read_regs(&h->kp, &regs, err, err_len);
     if (rc == 0) rc = kwatch_regions(&h->kp, regs.idtr_base, h->watch, err, err_len);
     if (rc != 0) {
         memset(h->watch, 0, sizeof(h->watch));

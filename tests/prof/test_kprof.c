@@ -5,8 +5,8 @@
 #include <inttypes.h>
 
 #include "fixture.h"
-#include "kern/prof/kfield.h"
-#include "kern/prof/kprof.h"
+#include "kern/kfield.h"
+#include "kern/kprof.h"
 
 static unsigned char *gunzip(const char *dir, const char *name, const char *file, size_t *len) {
     char cmd[4200];

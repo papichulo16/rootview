@@ -10,9 +10,9 @@
  * back to the clean dump reports the same pages the other way round. */
 #include <inttypes.h>
 
-#include "../../src/impl/kern/prof/khash/sha256.h"
+#include "../../src/impl/kern/khash/sha256.h"
 #include "fixture.h"
-#include "kern/prof/khash.h"
+#include "kern/khash.h"
 
 /* ---- a kmem_t that patches bytes over the dump and can fail one frame ---- */
 

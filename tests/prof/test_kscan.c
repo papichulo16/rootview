@@ -10,9 +10,9 @@
  * bits (or gains that flag), and every other object is as it was. */
 #include <inttypes.h>
 
-#include "../../src/impl/kern/prof/scan/kscan_priv.h"
+#include "../../src/impl/kern/scan/kscan_priv.h"
 #include "fixture.h"
-#include "kern/prof/kwalk.h"
+#include "kern/kwalk.h"
 
 /* ---- a kmem_t that patches 8-byte words over the dump ---- */
 

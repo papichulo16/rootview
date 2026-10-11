@@ -6,8 +6,8 @@
 #include <inttypes.h>
 
 #include "fixture.h"
-#include "kern/prof/btf.h"
-#include "kern/prof/ksym.h"
+#include "kern/btf.h"
+#include "kern/ksym.h"
 
 /* ---- synthetic blob builder ---- */
 

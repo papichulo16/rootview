@@ -8,7 +8,7 @@
 #include <inttypes.h>
 
 #include "fixture.h"
-#include "kern/prof/kwatch.h"
+#include "kern/kwatch.h"
 
 static uint64_t sym(const kprof_t *kp, const char *name) {
     const ksym_t *s = ksym_by_name(&kp->ksym, name);

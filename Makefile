@@ -38,12 +38,12 @@ clean:
 # offline tests: no libvmi, so only the prof pieces that read through kmem_t
 TEST_DIR := build/test
 TEST_CFLAGS := -Wall -Wextra -O2 -g -I$(INTF_DIR)
-PROF_CORE := $(addprefix $(IMPL_DIR)/kern/prof/,kmem_dump.c pt_root.c pt_walk.c pt_image.c ksym.c btf.c kprof.c kfield.c kwalk.c)
+PROF_CORE := $(addprefix $(IMPL_DIR)/kern/,kmem_dump.c pt_root.c pt_walk.c pt_image.c ksym.c btf.c kprof.c kfield.c kwalk.c)
 PROF_TESTS := test_pt test_ksym test_btf test_kprof test_kwalk test_kscan test_khash test_kcheck test_kwatch
-PROF_SCAN := $(wildcard $(IMPL_DIR)/kern/prof/scan/*.c)
-PROF_KHASH := $(wildcard $(IMPL_DIR)/kern/prof/khash/*.c)
-PROF_KCHECK := $(wildcard $(IMPL_DIR)/kern/prof/kcheck/*.c)
-PROF_KWATCH := $(wildcard $(IMPL_DIR)/kern/prof/kwatch/*.c)
+PROF_SCAN := $(wildcard $(IMPL_DIR)/kern/scan/*.c)
+PROF_KHASH := $(wildcard $(IMPL_DIR)/kern/khash/*.c)
+PROF_KCHECK := $(wildcard $(IMPL_DIR)/kern/kcheck/*.c)
+PROF_KWATCH := $(wildcard $(IMPL_DIR)/kern/kwatch/*.c)
 
 test: $(addprefix $(TEST_DIR)/,$(PROF_TESTS))
 	./$(TEST_DIR)/test_pt tests/fixtures
@@ -60,15 +60,15 @@ $(TEST_DIR)/test_%: tests/prof/test_%.c tests/prof/fixture.h $(PROF_CORE)
 	mkdir -p $(dir $@)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
-$(TEST_DIR)/test_kscan: tests/prof/test_kscan.c tests/prof/fixture.h $(PROF_CORE) $(PROF_SCAN) $(IMPL_DIR)/kern/prof/scan/kscan_priv.h
+$(TEST_DIR)/test_kscan: tests/prof/test_kscan.c tests/prof/fixture.h $(PROF_CORE) $(PROF_SCAN) $(IMPL_DIR)/kern/scan/kscan_priv.h
 	mkdir -p $(dir $@)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
-$(TEST_DIR)/test_khash: tests/prof/test_khash.c tests/prof/fixture.h $(PROF_CORE) $(PROF_KHASH) $(IMPL_DIR)/kern/prof/khash/sha256.h
+$(TEST_DIR)/test_khash: tests/prof/test_khash.c tests/prof/fixture.h $(PROF_CORE) $(PROF_KHASH) $(IMPL_DIR)/kern/khash/sha256.h
 	mkdir -p $(dir $@)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 
-$(TEST_DIR)/test_kcheck: tests/prof/test_kcheck.c tests/prof/fixture.h $(PROF_CORE) $(PROF_SCAN) $(PROF_KCHECK) $(IMPL_DIR)/kern/prof/kcheck/kcheck_priv.h
+$(TEST_DIR)/test_kcheck: tests/prof/test_kcheck.c tests/prof/fixture.h $(PROF_CORE) $(PROF_SCAN) $(PROF_KCHECK) $(IMPL_DIR)/kern/kcheck/kcheck_priv.h
 	mkdir -p $(dir $@)
 	$(CC) $(TEST_CFLAGS) $(filter %.c,$^) -o $@
 

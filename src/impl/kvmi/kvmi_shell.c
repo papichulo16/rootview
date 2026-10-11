@@ -8,10 +8,9 @@
 
 #include "hook/hook.h"
 #include "hook/hook_types.h"
-#include "kern/prof/kfield.h"
-#include "kern/prof/kprof.h"
-#include "kern/prof/kprof_vmi.h"
-#include "kern/prof/kwalk.h"
+#include "kern/kfield.h"
+#include "kern/kprof.h"
+#include "kern/kwalk.h"
 #include "vmi/vmi.h"
 #include "vmi/vmi_reg_names.h"
 
@@ -423,7 +422,6 @@ static void cmd_resume(vmi_session_t *session) {
 }
 
 typedef struct {
-    kprof_target_t target;
     kprof_t kp;
     bool ready;
 } prof_state_t;
@@ -431,10 +429,8 @@ typedef struct {
 static void cmd_prof(vmi_session_t *session, prof_state_t *ps) {
     if (ps->ready) kprof_free(&ps->kp);
     ps->ready = false;
-    kprof_vmi_target(session, &ps->target);
-
     char err[512];
-    if (kprof_init(&ps->kp, &ps->target, err, sizeof(err)) != 0) {
+    if (kprof_init(&ps->kp, session, err, sizeof(err)) != 0) {
         printf("error: %s\n", err);
         return;
     }

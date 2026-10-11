@@ -9,9 +9,9 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "kern/prof/kmem.h"
-#include "kern/prof/kprof.h"
-#include "kern/prof/pt.h"
+#include "kern/kmem.h"
+#include "kern/kprof.h"
+#include "kern/pt.h"
 
 static int failures;
 

@@ -6,7 +6,7 @@
 #include <stddef.h>
 
 #include "fixture.h"
-#include "kern/prof/ksym.h"
+#include "kern/ksym.h"
 
 static const ksym_cfg_t ALL_CFGS[] = {
     {KSYM_LAYOUT_V5, KSYM_ADDR_RELATIVE},   {KSYM_LAYOUT_V5, KSYM_ADDR_ABS_PERCPU},

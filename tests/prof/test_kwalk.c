@@ -7,8 +7,8 @@
 #include <unistd.h>
 
 #include "fixture.h"
-#include "kern/prof/kfield.h"
-#include "kern/prof/kwalk.h"
+#include "kern/kfield.h"
+#include "kern/kwalk.h"
 
 /* ---- a kmem_t that patches 8-byte words over the dump, and can be slow ---- */
 

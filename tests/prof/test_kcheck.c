@@ -12,8 +12,8 @@
 #include <inttypes.h>
 
 #include "fixture.h"
-#include "kern/prof/kcheck.h"
-#include "kern/prof/kfield.h"
+#include "kern/kcheck.h"
+#include "kern/kfield.h"
 
 /* ---- a kmem_t that patches bytes over the dump ---- */
 
