@@ -29,6 +29,9 @@ NAME_MAX = 64
 COMM_MAX = 16
 EVENTS_MAX = 4096
 SYM_MAX = 128
+KSYM_NAME_MAX = 512
+#: rv_ksyms chunk: symbols copied per call.
+KSYMS_CHUNK = 4096
 WINDOW = 16
 
 #: Node cap for list and idr walks; the C side clamps it to 1M.
@@ -100,6 +103,10 @@ class _IdrEntry(ctypes.Structure):
     _fields_ = [("id", ctypes.c_uint64), ("ptr", ctypes.c_uint64)]
 
 
+class _Ksym(ctypes.Structure):
+    _fields_ = [("addr", ctypes.c_uint64), ("type", ctypes.c_char), ("name", ctypes.c_char * KSYM_NAME_MAX)]
+
+
 class _Event(ctypes.Structure):
     _fields_ = [
         ("seq", ctypes.c_uint64),
@@ -167,6 +174,15 @@ class Task:
     pid: int
     tgid: int
     comm: str
+
+
+@dataclass(frozen=True)
+class Symbol:
+    """A kallsyms entry: ``type`` is the letter /proc/kallsyms prints (T, t, D, ...)."""
+
+    name: str
+    addr: int
+    type: str
 
 
 @dataclass(frozen=True)
@@ -269,6 +285,16 @@ def _load(path: str | os.PathLike | None = None) -> ctypes.CDLL:
         "rv_nr_cpus": (status, (h, c.POINTER(c.c_uint32), *err)),
         "rv_percpu_addr": (status, (h, c.c_char_p, c.c_uint32, u64_p, *err)),
         "rv_idr": (status, (h, c.c_uint64, c.POINTER(_IdrEntry), c.c_size_t, size_p, *err)),
+        "rv_list_off": (status, (h, c.c_uint64, c.c_uint64, u64_p, c.c_size_t, size_p, *err)),
+        "rv_hlist_off": (status, (h, c.c_uint64, c.c_uint64, u64_p, c.c_size_t, size_p, *err)),
+        "rv_rbtree": (status, (h, c.c_uint64, u64_p, c.c_size_t, size_p, *err)),
+        "rv_reg": (status, (h, c.c_char_p, u64_p, *err)),
+        "rv_translate": (status, (h, c.c_uint64, u64_p, *err)),
+        "rv_read_phys": (status, (h, c.c_uint64, c.c_void_p, c.c_size_t, *err)),
+        "rv_sym_at": (status, (h, c.c_uint64, c.POINTER(_Ksym), *err)),
+        "rv_ksyms": (status, (h, c.c_size_t, c.POINTER(_Ksym), c.c_size_t, size_p, *err)),
+        "rv_type_size": (status, (h, c.c_char_p, u64_p, *err)),
+        "rv_enum_value": (status, (h, c.c_char_p, c.c_char_p, c.POINTER(c.c_int64), *err)),
         "rv_hook_reg": (status, (h, c.c_char_p, c.c_char_p, *err)),
         "rv_hook_bp": (status, (h, c.c_char_p, c.c_uint64, *err)),
         "rv_hook_cpuid": (status, (h, c.c_char_p, c.c_char_p, *err)),
@@ -338,6 +364,7 @@ class Guest:
             raise BackendError(f"{vm_name}: {_text(err.value) or 'rv_init failed'}")
         self._h: int | None = h
         self.name = vm_name
+        self._symbols: list[Symbol] | None = None
 
     def close(self) -> None:
         with _lock:
@@ -460,6 +487,107 @@ class Guest:
         n = ctypes.c_size_t()
         _call(self._lib.rv_idr, self.handle, addr, out, max, ctypes.byref(n))
         return [(e.id, e.ptr) for e in out[: n.value]]
+
+    def list_off(self, head: int, off: int, max: int = WALK_MAX) -> list[int]:
+        """list() with the link's offset in its container given directly.
+
+        For links BTF can't name as a plain member, e.g. ``pid_links[0]``:
+        take ``field(...).offset`` of the array and add the element's offset.
+        """
+        out = (ctypes.c_uint64 * max)()
+        n = ctypes.c_size_t()
+        _call(self._lib.rv_list_off, self.handle, head, off, out, max, ctypes.byref(n))
+        return list(out[: n.value])
+
+    def hlist_off(self, head: int, off: int, max: int = WALK_MAX) -> list[int]:
+        """hlist() with the link's offset given directly; see list_off()."""
+        out = (ctypes.c_uint64 * max)()
+        n = ctypes.c_size_t()
+        _call(self._lib.rv_hlist_off, self.handle, head, off, out, max, ctypes.byref(n))
+        return list(out[: n.value])
+
+    def rbtree(self, root: int, max: int = WALK_MAX) -> list[int]:
+        """The ``struct rb_node`` addresses of the rb_root at ``root``, in order.
+
+        Subtract the node's offset in its container to get the containers.
+        A child that doesn't name its parent, or a tree deeper than ``max``
+        nodes allow, raises BackendError.
+        """
+        out = (ctypes.c_uint64 * max)()
+        n = ctypes.c_size_t()
+        _call(self._lib.rv_rbtree, self.handle, root, out, max, ctypes.byref(n))
+        return list(out[: n.value])
+
+    # ---- the raw guest: registers and physical memory ----
+
+    def reg(self, name: str) -> int:
+        """vcpu 0's register by name: ``cr3``, ``idtr_base``, ``msr_lstar``, ``rip``, ..."""
+        value = ctypes.c_uint64()
+        _call(self._lib.rv_reg, self.handle, name.encode(), ctypes.byref(value))
+        return value.value
+
+    def translate(self, va: int) -> int:
+        """``va``'s physical address through the vcpu's current page tables.
+
+        Raises BackendError when ``va`` isn't mapped, so probing a range page by
+        page finds what's mapped. Do that inside snapshot() for a stable answer.
+        """
+        pa = ctypes.c_uint64()
+        _call(self._lib.rv_translate, self.handle, va, ctypes.byref(pa))
+        return pa.value
+
+    def read_phys(self, pa: int, length: int) -> bytes:
+        buf = ctypes.create_string_buffer(length)
+        _call(self._lib.rv_read_phys, self.handle, pa, buf, length)
+        return buf.raw
+
+    # ---- kallsyms and BTF beyond single lookups ----
+
+    def sym_at(self, va: int) -> tuple[Symbol, int]:
+        """The symbol ``va`` falls in and the offset into it.
+
+        Only inside the core kernel image (``info().image``): elsewhere, e.g.
+        in a module, it raises BackendError rather than name the nearest
+        unrelated symbol.
+        """
+        k = _Ksym()
+        _call(self._lib.rv_sym_at, self.handle, va, ctypes.byref(k))
+        return Symbol(_text(k.name), k.addr, _text(k.type)), va - k.addr
+
+    def symbols(self) -> list[Symbol]:
+        """Every kallsyms entry, sorted by address. Fetched once per Guest.
+
+        For range questions (what follows a symbol, what lies in a section),
+        bisect over ``[s.addr for s in symbols()]``.
+        """
+        if self._symbols is None:
+            out = (_Ksym * KSYMS_CHUNK)()
+            total = ctypes.c_size_t()
+            syms: list[Symbol] = []
+            first = 0
+            while True:
+                _call(self._lib.rv_ksyms, self.handle, first, out, KSYMS_CHUNK, ctypes.byref(total))
+                got = min(KSYMS_CHUNK, total.value - first)
+                syms.extend(Symbol(_text(k.name), k.addr, _text(k.type)) for k in out[:got])
+                first += got
+                if first >= total.value:
+                    break
+            self._symbols = syms
+        return self._symbols
+
+    def type_size(self, type: str) -> int:
+        """sizeof a type: ``"module"``, ``"struct module"``, ``"enum x"`` or a typedef."""
+        size = ctypes.c_uint64()
+        _call(self._lib.rv_type_size, self.handle, type.encode(), ctypes.byref(size))
+        return size.value
+
+    def enum_value(self, name: str, enum: str | None = None) -> int:
+        """An enumerator's value. Without ``enum``, every enum is searched, which
+        is how anonymous ones (``FTRACE_FL_ENABLED``) are found."""
+        value = ctypes.c_int64()
+        _call(self._lib.rv_enum_value, self.handle, enum.encode() if enum else None, name.encode(),
+              ctypes.byref(value))
+        return value.value
 
     # ---- hooks: events land in the C ring; poll() fills it, events() drains it ----
 

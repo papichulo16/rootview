@@ -139,3 +139,74 @@ def test_events_start_empty(guest):
     events, dropped = guest.events()
     assert dropped == 0
     assert all(e.name for e in events)
+
+
+# ---- the building blocks python-side detection (cross-views, integrity, hashing) uses ----
+
+
+def test_symbols_sorted_and_sym_at(guest):
+    syms = guest.symbols()
+    assert len(syms) == guest.info().nsyms
+    assert all(a.addr <= b.addr for a, b in zip(syms, syms[1:]))
+    init_task = guest.sym("init_task")
+    sym, off = guest.sym_at(init_task + 8)
+    assert (sym.name, sym.addr, off) == ("init_task", init_task, 8)
+    with pytest.raises(BackendError, match="kernel image"):
+        guest.sym_at(0x1000)
+
+
+def test_types_and_enums(guest):
+    assert guest.type_size("module") == guest.type_size("struct module") > 0
+    assert guest.type_size("rb_node") == 24
+    assert guest.enum_value("PIDTYPE_PID", "pid_type") == 0
+    assert guest.enum_value("PIDTYPE_PID") == 0  # found without naming the enum
+    with pytest.raises(BackendError):
+        guest.enum_value("NO_SUCH_ENUMERATOR_ROOTVIEW")
+
+
+def test_registers_point_into_the_kernel(guest):
+    sym, _ = guest.sym_at(guest.reg("msr_lstar"))
+    assert sym.name.startswith("entry_SYSCALL_64")
+    with pytest.raises(BackendError, match="unknown register"):
+        guest.reg("no_such_reg")
+
+
+def test_idtr_maps_idt_table(guest):
+    with guest.snapshot():
+        assert guest.translate(guest.reg("idtr_base")) == guest.translate(guest.sym("idt_table"))
+
+
+def test_read_phys_matches_read(guest):
+    banner = guest.sym("linux_banner")
+    with guest.snapshot():
+        pa = guest.translate(banner)
+        assert guest.read_phys(pa, 14) == guest.read(banner, 14) == b"Linux version "
+
+
+def test_syscall_table_points_into_the_image(guest):
+    lo, hi = guest.info().image
+    table = guest.read(guest.sym("sys_call_table"), 8 * 64)
+    for nr in range(64):
+        target = int.from_bytes(table[8 * nr : 8 * nr + 8], "little")
+        assert lo <= target < hi, f"syscall {nr} -> {target:#x}"
+
+
+def test_pid_links_through_hlist_off(guest):
+    tasks = guest.tasks()
+    task = next(t for t in tasks if t.pid == 1)
+    pid = guest.read_field("task_struct", "thread_pid", task.addr).value
+    head = pid + guest.field("pid", "tasks").offset  # tasks[PIDTYPE_PID]
+    links = guest.field("task_struct", "pid_links").offset  # pid_links[PIDTYPE_PID]
+    assert task.addr in guest.hlist_off(head, links)
+
+
+def test_mod_tree_matches_module_list(guest):
+    with guest.snapshot():
+        listed = set(guest.list(guest.sym("modules"), "module", "list"))
+        root = guest.sym("mod_tree") + guest.field("mod_tree_root", "root.tree").offset  # tree[0]
+        node = guest.field("mod_tree_node", "node").offset  # node[0], the one tree[0] links
+        mod = guest.field("mod_tree_node", "mod").offset
+        in_tree = set()
+        for rb in guest.rbtree(root):
+            in_tree.add(int.from_bytes(guest.read(rb - node + mod, 8), "little"))
+    assert listed and listed == in_tree

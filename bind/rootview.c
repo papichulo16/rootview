@@ -1,5 +1,6 @@
 #include "rootview.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,7 @@
 #include "vm/vm_state.h"
 #include "vm/vm_store.h"
 #include "vmi/vmi.h"
+#include "vmi/vmi_reg_names.h"
 
 #define API __attribute__((visibility("default")))
 
@@ -264,6 +266,120 @@ _Static_assert(sizeof(rv_idr_entry_t) == sizeof(kwalk_idr_entry_t), "rv_idr_entr
 
 API int rv_idr(rv_handle_t *h, uint64_t idr, rv_idr_entry_t *out, size_t max, size_t *n, char *err, size_t err_len) {
     return kwalk_idr(&h->w, idr, (kwalk_idr_entry_t *) out, max, n, err, err_len);
+}
+
+API int rv_list_off(rv_handle_t *h, uint64_t head, uint64_t off, uint64_t *out, size_t max, size_t *n, char *err,
+                    size_t err_len) {
+    return kwalk_list_off(&h->w, head, off, out, max, n, err, err_len);
+}
+
+API int rv_hlist_off(rv_handle_t *h, uint64_t head, uint64_t off, uint64_t *out, size_t max, size_t *n, char *err,
+                     size_t err_len) {
+    return kwalk_hlist_off(&h->w, head, off, out, max, n, err, err_len);
+}
+
+API int rv_rbtree(rv_handle_t *h, uint64_t root, uint64_t *out, size_t max, size_t *n, char *err, size_t err_len) {
+    return kwalk_rbtree(&h->w, root, out, max, n, err, err_len);
+}
+
+/* ---- the raw guest ---- */
+
+API int rv_reg(rv_handle_t *h, const char *name, uint64_t *value, char *err, size_t err_len) {
+    reg_t reg;
+    if (vmi_reg_lookup(name, &reg) != 0) {
+        if (err) snprintf(err, err_len, "unknown register %s", name);
+        return -1;
+    }
+    return vmi_read_reg(&h->session, reg, value, err, err_len);
+}
+
+API int rv_translate(rv_handle_t *h, uint64_t va, uint64_t *pa, char *err, size_t err_len) {
+    return vmi_translate_virt(&h->session, va, pa, err, err_len);
+}
+
+API int rv_read_phys(rv_handle_t *h, uint64_t pa, void *buf, size_t len, char *err, size_t err_len) {
+    return vmi_read_phys(&h->session, pa, buf, len, err, err_len);
+}
+
+/* ---- kallsyms and BTF ---- */
+
+static void ksym_into(const ksym_t *s, rv_ksym_t *out) {
+    *out = (rv_ksym_t) {.addr = s->addr, .type = s->type};
+    snprintf(out->name, sizeof(out->name), "%s", s->name);
+}
+
+API int rv_sym_at(rv_handle_t *h, uint64_t va, rv_ksym_t *out, char *err, size_t err_len) {
+    const kprof_t *kp = &h->kp;
+    const ksym_t *s = va >= kp->img_start && va < kp->img_end ? ksym_by_addr(&kp->ksym, va, NULL) : NULL;
+    if (!s) {
+        if (err) snprintf(err, err_len, "0x%" PRIx64 " isn't inside the kernel image", va);
+        return -1;
+    }
+    ksym_into(s, out);
+    return 0;
+}
+
+API int rv_ksyms(rv_handle_t *h, size_t first, rv_ksym_t *out, size_t max, size_t *total, char *err,
+                 size_t err_len) {
+    (void) err, (void) err_len;
+    const ksym_table_t *tab = &h->kp.ksym;
+    for (size_t i = first; i < tab->n && i - first < max; i++) ksym_into(&tab->syms[i], &out[i - first]);
+    *total = tab->n;
+    return 0;
+}
+
+/* a type name as C spells it, or a bare name tried as each kind in turn */
+static uint32_t find_type(const btf_t *b, const char *type) {
+    static const struct {
+        const char *prefix;
+        btf_kind_t kind;
+    } prefixed[] = {{"struct ", BTF_KIND_STRUCT}, {"union ", BTF_KIND_UNION}, {"enum ", BTF_KIND_ENUM}};
+    static const btf_kind_t bare[] = {BTF_KIND_STRUCT, BTF_KIND_UNION, BTF_KIND_TYPEDEF, BTF_KIND_ENUM,
+                                      BTF_KIND_ENUM64, BTF_KIND_INT};
+    for (size_t i = 0; i < sizeof(prefixed) / sizeof(prefixed[0]); i++) {
+        size_t l = strlen(prefixed[i].prefix);
+        if (strncmp(type, prefixed[i].prefix, l) != 0) continue;
+        uint32_t id = btf_find(b, type + l, prefixed[i].kind);
+        if (!id && prefixed[i].kind == BTF_KIND_ENUM) id = btf_find(b, type + l, BTF_KIND_ENUM64);
+        return id;
+    }
+    for (size_t i = 0; i < sizeof(bare) / sizeof(bare[0]); i++) {
+        uint32_t id = btf_find(b, type, bare[i]);
+        if (id) return id;
+    }
+    return 0;
+}
+
+API int rv_type_size(rv_handle_t *h, const char *type, uint64_t *size, char *err, size_t err_len) {
+    uint32_t id = find_type(&h->kp.btf, type);
+    int64_t sz = id ? btf_size(&h->kp.btf, id) : -1;
+    if (sz < 0) {
+        if (err) snprintf(err, err_len, id ? "%s has no size" : "no type %s in BTF", type);
+        return -1;
+    }
+    *size = (uint64_t) sz;
+    return 0;
+}
+
+API int rv_enum_value(rv_handle_t *h, const char *enum_type, const char *name, int64_t *value, char *err,
+                      size_t err_len) {
+    const btf_t *b = &h->kp.btf;
+    if (enum_type && enum_type[0]) {
+        char spelled[256];
+        snprintf(spelled, sizeof(spelled), "enum %s", strncmp(enum_type, "enum ", 5) == 0 ? enum_type + 5 : enum_type);
+        uint32_t id = find_type(b, spelled);
+        if (!id) id = find_type(b, enum_type); /* a typedef of one */
+        if (id && btf_enum_value(b, id, name, value) == 0) return 0;
+        if (err) snprintf(err, err_len, id ? "%s has no enumerator %s" : "no enum %s in BTF", enum_type, name);
+        return -1;
+    }
+    for (uint32_t id = 1; id < b->n; id++) {
+        btf_type_t t;
+        if (btf_type(b, id, &t) != 0 || (t.kind != BTF_KIND_ENUM && t.kind != BTF_KIND_ENUM64)) continue;
+        if (btf_enum_value(b, id, name, value) == 0) return 0;
+    }
+    if (err) snprintf(err, err_len, "no enumerator %s in any enum", name);
+    return -1;
 }
 
 /* ---- hooks and the event ring ---- */

@@ -19,6 +19,7 @@
 #define RV_EVENTS_MAX 4096 /* the hook event ring */
 #define RV_SYM_MAX 128
 #define RV_WINDOW 16 /* a captured write's window */
+#define RV_KSYM_NAME_MAX 512 /* the kernel's KSYM_NAME_LEN */
 
 typedef struct rv_handle rv_handle_t;
 
@@ -71,6 +72,12 @@ typedef struct {
     uint64_t id;
     uint64_t ptr;
 } rv_idr_entry_t;
+
+typedef struct {
+    uint64_t addr;
+    char type; /* kallsyms' type letter: T, t, D, ... */
+    char name[RV_KSYM_NAME_MAX];
+} rv_ksym_t;
 
 /* rv_event_t's kind, mirroring hook_kind_t */
 enum { RV_HOOK_REGISTER, RV_HOOK_BREAKPOINT, RV_HOOK_CPUID, RV_HOOK_DESCRIPTOR, RV_HOOK_MEM };
@@ -155,6 +162,49 @@ int rv_percpu_addr(rv_handle_t *h, const char *sym, uint32_t cpu, uint64_t *addr
 
 /* (id, pointer) pairs of the struct idr at idr, e.g. rv_sym("prog_idr") */
 int rv_idr(rv_handle_t *h, uint64_t idr, rv_idr_entry_t *out, size_t max, size_t *n, char *err, size_t err_len);
+
+/* rv_list and rv_hlist with the link's offset in its container given
+ * directly, for links BTF can't name as a plain member (pid_links[0]) */
+int rv_list_off(rv_handle_t *h, uint64_t head, uint64_t off, uint64_t *out, size_t max, size_t *n, char *err,
+                size_t err_len);
+int rv_hlist_off(rv_handle_t *h, uint64_t head, uint64_t off, uint64_t *out, size_t max, size_t *n, char *err,
+                 size_t err_len);
+
+/* the struct rb_node addresses of the rb_root at root, in order: the
+ * caller subtracts the node's offset in its container. like rv_list, more
+ * than max nodes is an error. */
+int rv_rbtree(rv_handle_t *h, uint64_t root, uint64_t *out, size_t max, size_t *n, char *err, size_t err_len);
+
+/* ---- the raw guest, for detection logic that needs more than the profile ---- */
+
+/* vcpu 0's register by name, as vmi_reg_lookup takes it ("idtr_base",
+ * "msr_lstar", "cr3", ...) */
+int rv_reg(rv_handle_t *h, const char *name, uint64_t *value, char *err, size_t err_len);
+
+/* va's physical address, through the vcpu's current page tables. like
+ * rv_read, open a snapshot window first for a consistent answer. */
+int rv_translate(rv_handle_t *h, uint64_t va, uint64_t *pa, char *err, size_t err_len);
+int rv_read_phys(rv_handle_t *h, uint64_t pa, void *buf, size_t len, char *err, size_t err_len);
+
+/* ---- kallsyms and BTF beyond single lookups ---- */
+
+/* the symbol va falls in: name, its address and type. only inside the
+ * core image - outside it the nearest symbol means nothing (the absolute
+ * per-cpu ones start at 0). */
+int rv_sym_at(rv_handle_t *h, uint64_t va, rv_ksym_t *out, char *err, size_t err_len);
+
+/* the whole kallsyms table, sorted by address, in chunks: out gets
+ * syms[first, first + max) and *total the table's size */
+int rv_ksyms(rv_handle_t *h, size_t first, rv_ksym_t *out, size_t max, size_t *total, char *err, size_t err_len);
+
+/* sizeof a type by name: "module", "struct module", "union x", "enum x"
+ * or a typedef ("pid_t") */
+int rv_type_size(rv_handle_t *h, const char *type, uint64_t *size, char *err, size_t err_len);
+
+/* the value of an enumerator. enum_type names the enum ("mod_mem_type");
+ * NULL or "" searches every enum, for the anonymous ones (FTRACE_FL_*). */
+int rv_enum_value(rv_handle_t *h, const char *enum_type, const char *name, int64_t *value, char *err,
+                  size_t err_len);
 
 /* hooks: each pushes its events into the handle's ring, which rv_hook_poll
  * fills and rv_events drains, oldest first: up to max per call, *n how
