@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 
-from rootview.rvprimitives import Guest, RootviewError
+from rootview.rvprim import Guest, RootviewError
 
 PAGE = 4096
 #: the kernel's text and rodata, as kallsyms bounds them

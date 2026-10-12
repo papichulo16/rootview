@@ -6,7 +6,7 @@ from __future__ import annotations
 import bisect
 import struct
 
-from rootview.rvprimitives import Guest, RootviewError, Symbol, list_vms
+from rootview.rvprim import Guest, RootviewError, Symbol, list_vms
 
 # what list_del leaves in next/prev: ILLEGAL_POINTER_VALUE + 0x100 / + 0x122
 LIST_POISON1 = 0xDEAD000000000100

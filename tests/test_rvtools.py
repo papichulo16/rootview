@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from rootview.rvprimitives import HookEvent
+from rootview.rvprim import HookEvent
 from rootview.rvtools import Ftrace, Layout, MemWatch, Modules, Symbols, Tables, Tasks
 from rootview.rvtools import pagehash
 from rootview.rvtools.modules import STATES

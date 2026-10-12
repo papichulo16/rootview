@@ -1,12 +1,12 @@
 """rootview: introspection of running KVM guests through KVMI.
 
-  rootview.rvprimitives  the VMI primitives over librootview.so
-  rootview.rvtools       tooling on top of them for a detection engine
+  rootview.rvprim    the VMI primitives over librootview.so
+  rootview.rvtools   tooling on top of them for a detection engine
 
 The primitives are re-exported here: ``from rootview import Guest``.
 """
 
-from rootview.rvprimitives import (
+from rootview.rvprim import (
     Field,
     Guest,
     GuestVm,

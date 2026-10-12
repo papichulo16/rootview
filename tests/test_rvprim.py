@@ -1,22 +1,22 @@
-"""rootview.rvprimitives against a real guest (see conftest.py)."""
+"""rootview.rvprim against a real guest (see conftest.py)."""
 
 from __future__ import annotations
 
 import pytest
 
-from rootview import rvprimitives
-from rootview.rvprimitives import RootviewError
+from rootview import rvprim
+from rootview.rvprim import RootviewError
 
 
 def test_list_vms_returns_store_entries(guest):
-    for vm in rvprimitives.list_vms():
+    for vm in rvprim.list_vms():
         assert vm.name
         assert not (vm.kvmi and not vm.running)
 
 
 def test_unknown_vm_raises_rootview_error(guest):
     with pytest.raises(RootviewError):
-        rvprimitives.Guest("no-such-vm-rootview-test")
+        rvprim.Guest("no-such-vm-rootview-test")
 
 
 def test_info(guest):

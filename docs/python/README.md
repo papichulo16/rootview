@@ -12,7 +12,7 @@ with Guest("myvm") as g:
     print(g.read_field("task_struct", "comm", g.sym("init_task")).value)  # swapper/0
 ```
 
-- [rvprimitives](rvprimitives.md): the VMI primitives.
+- [rvprim](rvprim.md): the VMI primitives.
 - [rvtools](rvtools.md): tooling on top of them.
 
 Every failure raises `rootview.RootviewError`. Calls are thread-safe (one lock).

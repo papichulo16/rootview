@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rootview.rvprimitives import Guest, RootviewError
+from rootview.rvprim import Guest, RootviewError
 from rootview.rvtools.common import LIST_POISON1, LIST_POISON2, Layout, is_kernel_va, qwords, read_u32, read_u64
 
 SOURCES = ("module_list", "mod_tree[0]", "mod_tree[1]", "carve")

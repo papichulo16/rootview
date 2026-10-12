@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rootview.rvprimitives import Guest, HookEvent
+from rootview.rvprim import Guest, HookEvent
 
 PAGE = 4096
 

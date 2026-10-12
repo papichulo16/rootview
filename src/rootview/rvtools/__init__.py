@@ -1,4 +1,4 @@
-"""Tooling on top of rootview.rvprimitives for a detection engine to build on.
+"""Tooling on top of rootview.rvprim for a detection engine to build on.
 
 Each tool enumerates or decodes one part of the guest kernel and reports
 facts. None of them decides what is malicious.

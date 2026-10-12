@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rootview.rvprimitives import Guest
+from rootview.rvprim import Guest
 from rootview.rvtools.common import Symbols, qwords
 
 TEXT_TYPES = "TtWw"  # kallsyms types of code symbols

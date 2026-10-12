@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rootview.rvprimitives import Guest, RootviewError
+from rootview.rvprim import Guest, RootviewError
 from rootview.rvtools.common import Layout, is_kernel_va, read_u64
 
 PF_KTHREAD = 0x00200000

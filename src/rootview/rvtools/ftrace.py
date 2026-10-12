@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rootview.rvprimitives import Guest, RootviewError
+from rootview.rvprim import Guest, RootviewError
 from rootview.rvtools.common import Layout, is_kernel_va, read_u64
 
 NOP5 = bytes((0x0F, 0x1F, 0x44, 0x00, 0x00))

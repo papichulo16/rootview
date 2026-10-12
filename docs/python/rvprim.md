@@ -1,4 +1,4 @@
-# rootview.rvprimitives
+# rootview.rvprim
 
 `Guest(vm)` attaches to a running kvmi guest and builds its kernel profile
 (pauses it ~1s). Use it as a context manager.

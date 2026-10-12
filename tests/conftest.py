@@ -8,24 +8,24 @@ import os
 
 import pytest
 
-from rootview import rvprimitives
-from rootview.rvprimitives import RootviewError
+from rootview import rvprim
+from rootview.rvprim import RootviewError
 
 
 def _guest_name() -> str | None:
     if name := os.environ.get("ROOTVIEW_TEST_VM"):
         return name
-    return next((v.name for v in rvprimitives.list_vms() if v.running and v.kvmi), None)
+    return next((v.name for v in rvprim.list_vms() if v.running and v.kvmi), None)
 
 
 @pytest.fixture(scope="session")
 def guest():
     try:
-        rvprimitives.lib()
+        rvprim.lib()
     except RootviewError as e:
         pytest.skip(f"librootview.so not loadable: {e}")
     name = _guest_name()
     if name is None:
         pytest.skip("no running kvmi guest (set ROOTVIEW_TEST_VM)")
-    with rvprimitives.Guest(name) as g:
+    with rvprim.Guest(name) as g:
         yield g

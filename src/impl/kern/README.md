@@ -24,6 +24,6 @@ copy. `kwalk` takes the finished `kprof_t`.
 ## Used by
 
 - `kvmi/kvmi_shell.c`: the `prof`, `sym`, `field` and `tasks` commands.
-- `bind/rootview.c`: the `rv_*` API that `rootview.rvprimitives` wraps.
+- `bind/rootview.c`: the `rv_*` API that `rootview.rvprim` wraps.
   Nothing here is rootkit-specific; that lives in Python above
   `rootview.rvtools`.

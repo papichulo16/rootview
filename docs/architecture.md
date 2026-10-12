@@ -12,8 +12,8 @@ src/impl/kvmi    (C)                vmi/: read/write memory and registers, pause
                                     hook/: register, breakpoint, cpuid, memory hooks
 src/impl/kern    (C)                kallsyms + BTF from the guest image; field reads, walks
 bind/            (C)                librootview.so: flat rv_* API over the above
-rootview.rvprimitives (Python)      ctypes wrapper over rv_*: the VMI primitives
-rootview.rvtools      (Python)      tooling for a detection engine: enumerate, decode
+rootview.rvprim  (Python)           ctypes wrapper over rv_*: the VMI primitives
+rootview.rvtools (Python)           tooling for a detection engine: enumerate, decode
 examples/, web server, CLI          consumers
 ```
 

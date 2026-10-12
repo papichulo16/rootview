@@ -9,7 +9,7 @@
 | `src/impl/kvmi/kvmi_shell.c` | `rv kvmi attach` shell |
 | `src/impl/kern/` | kallsyms, BTF, fields, walks (see its README) |
 | `bind/` | `librootview.so` and its `rv_*` API (`rootview.h`) |
-| `src/rootview/` | the Python package: `rvprimitives.py`, `rvtools/` |
+| `src/rootview/` | the Python package: `rvprim.py`, `rvtools/` |
 | `src/ui/dynamic/` | the web server |
 | `tests/` | live Python tests |
 | `examples/` | scripts using rvtools |
