@@ -15,16 +15,15 @@ Headers are in `src/intf/kern/`.
 | `btf.c` | Finds and parses the kernel's `.BTF` section. Looks up types, sizes, struct members (dotted paths like `se.vruntime`) and enum values. |
 | `kfield.c` | Struct fields by name on top of BTF. `kfield_resolve` gives a field's offset, size and kind; `kfield_read` reads and decodes it from a struct in guest memory. |
 | `kwalk.c` | Walks kernel data structures: `list_head`, `hlist`, rb-trees, idr/xarray and per-cpu variables. Every pointer is treated as hostile (cycle checks, node caps, time budget). A snapshot window pauses the vm and caches pages so a walk sees one consistent state. |
-| `kwatch.c` | Works out which guest frames hold `sys_call_table` and the IDT, for EPT write hooks. Decodes a write to one of them into the slot hit and its old and new target. The hook itself lives in `kvmi/hook`. |
 
 ## Order
 
 `kprof_init` runs `kimg` → `ksym` → `btf` → `kfield`, then frees the image
-copy. `kwalk` and `kwatch` take the finished `kprof_t`.
+copy. `kwalk` takes the finished `kprof_t`.
 
 ## Used by
 
 - `kvmi/kvmi_shell.c`: the `prof`, `sym`, `field` and `tasks` commands.
-- `bind/rootview.c`: the `rv_*` API that `rvlib.py` wraps. Detection logic
-  (cross-views, integrity checks, hashing) is meant to be written in Python
-  on top of it.
+- `bind/rootview.c`: the `rv_*` API that `rootview.rvprimitives` wraps.
+  Nothing here is rootkit-specific; that lives in Python above
+  `rootview.rvtools`.

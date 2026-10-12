@@ -82,8 +82,6 @@ typedef struct {
 /* rv_event_t's kind, mirroring hook_kind_t */
 enum { RV_HOOK_REGISTER, RV_HOOK_BREAKPOINT, RV_HOOK_CPUID, RV_HOOK_DESCRIPTOR, RV_HOOK_MEM };
 
-/* rv_event_t's watch: which table rv_watch_tables' hook fired on */
-enum { RV_WATCH_NONE, RV_WATCH_SYSCALL, RV_WATCH_IDT };
 
 typedef struct {
     uint64_t seq; /* counts every event pushed, dropped ones included */
@@ -109,15 +107,6 @@ typedef struct {
     int captured, after_ok;
     uint64_t window;
     uint8_t before[RV_WINDOW], after[RV_WINDOW];
-
-    /* a watched table's write, decoded: the slot (syscall nr or vector, -1
-     * for a write to the frame outside the table) and its target before
-     * and after in old_value / new_value, each with its kallsyms name */
-    int watch;
-    int64_t slot;
-    uint64_t slot_va;
-    char old_sym[RV_SYM_MAX], new_sym[RV_SYM_MAX];
-    uint64_t old_off, new_off;
 } rv_event_t;
 
 /* where the vm store lives: <dir>/.rootview/vms. defaults to the cwd. */
@@ -220,12 +209,11 @@ int rv_hook_remove(rv_handle_t *h, const char *name, char *err, size_t err_len);
 int rv_hook_poll(rv_handle_t *h, uint32_t timeout_ms, char *err, size_t err_len);
 int rv_events(rv_handle_t *h, rv_event_t *out, size_t max, size_t *n, uint64_t *dropped, char *err, size_t err_len);
 
-/* write-protects every frame under sys_call_table and the IDT (vcpu 0's
- * IDTR), with capture: each write lands in the ring as a MEM event with
- * watch set, the slot it hit, the target before and after, and the rip
- * that wrote, all named. hooks are "watch:<table>:<n>", one per frame.
- * a table patched before the watch went on raises nothing here. */
-int rv_watch_tables(rv_handle_t *h, char *err, size_t err_len);
-int rv_unwatch_tables(rv_handle_t *h, char *err, size_t err_len);
+/* rv_hook_mem on a guest frame named directly (gfn = pa >> 12, e.g. from
+ * rv_translate) rather than a va through the current CR3. with capture, a
+ * write event also carries the 16-byte window around the written address
+ * before and after the write (captured, after_ok, window, before, after). */
+int rv_hook_mem_gfn(rv_handle_t *h, const char *name, uint64_t gfn, const char *access, int capture, char *err,
+                    size_t err_len);
 
 #endif

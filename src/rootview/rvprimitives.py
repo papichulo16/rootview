@@ -1,12 +1,17 @@
-"""ctypes bindings for librootview.so, the engine's flat C API (bind/rootview.h).
+"""Guest introspection: ctypes bindings for librootview.so (bind/rootview.h).
+
+Attach to a running kvmi guest and read its kernel by name: symbols from
+kallsyms, struct layouts from BTF, list/tree/idr walks, registers, physical
+memory and hooks. Nothing here knows about rootkits; rootview.rvtools builds
+the tooling a detection engine needs on top of it.
 
 Built with ``make lib`` at the repository root, which puts ``librootview.so``
 next to ``rv``. Set ``ROOTVIEW_LIB`` to load it from anywhere else.
 
-The C side is not thread-safe, and the web server calls in from
-``asyncio.to_thread`` workers, so every call into the library goes through one
-process-wide lock. A failed call's err string comes back as
-:class:`~rootview_web.backends.base.BackendError`.
+The C side is not thread-safe, and callers may come in from worker threads
+(the web server uses ``asyncio.to_thread``), so every call into the library
+goes through one process-wide lock. A failed call's err string comes back as
+:class:`RootviewError`.
 """
 
 from __future__ import annotations
@@ -19,10 +24,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from rootview_web.backends.base import BackendError
-
-#: The repository root: rootview_web/backends/ -> src/ui/dynamic -> repo.
-REPO_ROOT = Path(__file__).resolve().parents[5]
+#: The repository root: src/rootview/ -> src -> repo.
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 ERR_MAX = 512
 NAME_MAX = 64
@@ -40,6 +43,11 @@ WALK_MAX = 65536
 # reentrant: Guest.__del__ can run from a GC pass that fires inside a locked call
 _lock = threading.RLock()
 _lib: ctypes.CDLL | None = None
+
+
+class RootviewError(RuntimeError):
+    """An introspection call failed: the guest isn't attachable, an address
+    isn't mapped, a type or symbol doesn't exist. Expected in normal operation."""
 
 
 class _Vm(ctypes.Structure):
@@ -130,13 +138,6 @@ class _Event(ctypes.Structure):
         ("window", ctypes.c_uint64),
         ("before", ctypes.c_uint8 * WINDOW),
         ("after", ctypes.c_uint8 * WINDOW),
-        ("watch", ctypes.c_int),
-        ("slot", ctypes.c_int64),
-        ("slot_va", ctypes.c_uint64),
-        ("old_sym", ctypes.c_char * SYM_MAX),
-        ("new_sym", ctypes.c_char * SYM_MAX),
-        ("old_off", ctypes.c_uint64),
-        ("new_off", ctypes.c_uint64),
     ]
 
 
@@ -144,8 +145,6 @@ class _Event(ctypes.Structure):
 KINDS = ("u", "s", "ptr", "bytes", "cstr", "enum")
 #: rv_event_t's kind, by value (RV_HOOK_*).
 HOOK_KINDS = ("register", "breakpoint", "cpuid", "descriptor", "mem")
-#: rv_event_t's watch, by value (RV_WATCH_*): which table rv_watch_tables' hook fired on.
-WATCH_TABLES = (None, "sys_call_table", "idt")
 
 
 @dataclass(frozen=True)
@@ -238,16 +237,6 @@ class HookEvent:
     window: int = 0
     before: bytes = b""
     after: bytes = b""
-    #: a watched table's write (Guest.watch_tables): the table, the slot it hit
-    #: (syscall nr or vector, -1 outside the table) and the slot's target before
-    #: and after - in ``old_value`` / ``new_value`` - by name.
-    watch: str | None = None
-    slot: int = -1
-    slot_va: int = 0
-    old_sym: str = ""
-    old_off: int = 0
-    new_sym: str = ""
-    new_off: int = 0
 
 
 def _text(raw: bytes) -> str:
@@ -259,7 +248,7 @@ def _load(path: str | os.PathLike | None = None) -> ctypes.CDLL:
     try:
         lib = ctypes.CDLL(str(path))
     except OSError as e:
-        raise BackendError(f"could not load {path} (run `make lib` at the repo root): {e}") from None
+        raise RootviewError(f"could not load {path} (run `make lib` at the repo root): {e}") from None
 
     c = ctypes
     err = (c.c_char_p, c.c_size_t)
@@ -303,8 +292,7 @@ def _load(path: str | os.PathLike | None = None) -> ctypes.CDLL:
         "rv_hook_remove": (status, (h, c.c_char_p, *err)),
         "rv_hook_poll": (status, (h, c.c_uint32, *err)),
         "rv_events": (status, (h, c.POINTER(_Event), c.c_size_t, size_p, u64_p, *err)),
-        "rv_watch_tables": (status, (h, *err)),
-        "rv_unwatch_tables": (status, (h, *err)),
+        "rv_hook_mem_gfn": (status, (h, c.c_char_p, c.c_uint64, c.c_char_p, c.c_int, *err)),
     }
     for name, (restype, argtypes) in sigs.items():
         fn = getattr(lib, name)
@@ -315,7 +303,7 @@ def _load(path: str | os.PathLike | None = None) -> ctypes.CDLL:
 
 
 def lib(path: str | os.PathLike | None = None) -> ctypes.CDLL:
-    """The loaded library, loading it on first use. Raises BackendError if it can't be."""
+    """The loaded library, loading it on first use. Raises RootviewError if it can't be."""
     global _lib
     with _lock:
         if _lib is None:
@@ -329,7 +317,7 @@ def _call(fn, *args) -> None:
     with _lock:
         rc = fn(*args, err, ERR_MAX)
     if rc != 0:
-        raise BackendError(_text(err.value) or f"{fn.__name__} failed")
+        raise RootviewError(_text(err.value) or f"{fn.__name__} failed")
 
 
 def set_base(dir: str | os.PathLike) -> None:
@@ -361,7 +349,7 @@ class Guest:
         with _lock:
             h = self._lib.rv_init(vm_name.encode(), err, ERR_MAX)
         if not h:
-            raise BackendError(f"{vm_name}: {_text(err.value) or 'rv_init failed'}")
+            raise RootviewError(f"{vm_name}: {_text(err.value) or 'rv_init failed'}")
         self._h: int | None = h
         self.name = vm_name
         self._symbols: list[Symbol] | None = None
@@ -385,7 +373,7 @@ class Guest:
     @property
     def handle(self) -> int:
         if self._h is None:
-            raise BackendError(f"{self.name}: guest is closed")
+            raise RootviewError(f"{self.name}: guest is closed")
         return self._h
 
     def info(self) -> KernelInfo:
@@ -462,7 +450,7 @@ class Guest:
     def list(self, head: int, type: str, member: str, max: int = WALK_MAX) -> list[int]:
         """Container addresses on the list_head list anchored at ``head``.
 
-        More than ``max`` nodes, a cycle, or a wild pointer raises BackendError.
+        More than ``max`` nodes, a cycle, or a wild pointer raises RootviewError.
         """
         return self._walk(self._lib.rv_list, head, type, member, max)
 
@@ -511,7 +499,7 @@ class Guest:
 
         Subtract the node's offset in its container to get the containers.
         A child that doesn't name its parent, or a tree deeper than ``max``
-        nodes allow, raises BackendError.
+        nodes allow, raises RootviewError.
         """
         out = (ctypes.c_uint64 * max)()
         n = ctypes.c_size_t()
@@ -529,7 +517,7 @@ class Guest:
     def translate(self, va: int) -> int:
         """``va``'s physical address through the vcpu's current page tables.
 
-        Raises BackendError when ``va`` isn't mapped, so probing a range page by
+        Raises RootviewError when ``va`` isn't mapped, so probing a range page by
         page finds what's mapped. Do that inside snapshot() for a stable answer.
         """
         pa = ctypes.c_uint64()
@@ -547,7 +535,7 @@ class Guest:
         """The symbol ``va`` falls in and the offset into it.
 
         Only inside the core kernel image (``info().image``): elsewhere, e.g.
-        in a module, it raises BackendError rather than name the nearest
+        in a module, it raises RootviewError rather than name the nearest
         unrelated symbol.
         """
         k = _Ksym()
@@ -608,19 +596,14 @@ class Guest:
         """Trap ``access`` (any of r, w, x) to the page holding ``va``."""
         _call(self._lib.rv_hook_mem, self.handle, name.encode(), va, access.encode())
 
-    def watch_tables(self) -> None:
-        """Write-protect the frames under sys_call_table and the IDT.
+    def hook_mem_gfn(self, name: str, gfn: int, access: str, capture: bool = False) -> None:
+        """hook_mem() on a guest frame (``translate(va) >> 12``) rather than a va.
 
-        Each write then arrives through poll()/events() as a ``mem`` event with
-        ``watch`` set, the slot it hit, the slot's target before and after, and
-        the rip that wrote it. This catches the moment of patching; keep the
-        periodic table and hash scans as well, since a table already patched
-        before this call raises no event.
+        With ``capture``, each write event also carries the 16-byte window around
+        the written address before and after the write (``window``, ``before``,
+        ``after``), which is enough to decode what a write to a table changed.
         """
-        _call(self._lib.rv_watch_tables, self.handle)
-
-    def unwatch_tables(self) -> None:
-        _call(self._lib.rv_unwatch_tables, self.handle)
+        _call(self._lib.rv_hook_mem_gfn, self.handle, name.encode(), gfn, access.encode(), int(capture))
 
     def hook_remove(self, name: str) -> None:
         _call(self._lib.rv_hook_remove, self.handle, name.encode())
@@ -662,13 +645,6 @@ class Guest:
                 e.window,
                 bytes(e.before),
                 bytes(e.after),
-                WATCH_TABLES[e.watch] if 0 <= e.watch < len(WATCH_TABLES) else str(e.watch),
-                e.slot,
-                e.slot_va,
-                _text(e.old_sym),
-                e.old_off,
-                _text(e.new_sym),
-                e.new_off,
             )
             for e in out[: n.value]
         ], dropped.value

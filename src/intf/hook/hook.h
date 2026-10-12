@@ -42,9 +42,9 @@ int hook_desc_add(hook_manager_t *mgr, const char *name, const char *table,
 int hook_mem_add(hook_manager_t *mgr, const char *name, uint64_t vaddr, const char *access,
                   hook_callback_t callback, void *user_data, char *err, size_t err_len);
 
-/* the same on a guest frame named directly, for callers that translate
- * through their own root (kwatch's frames, through kprof's) rather than
- * the vcpu's current CR3. with capture, a write event also carries the
+/* the same on a guest frame named directly, for callers that already
+ * have the physical frame rather than a va through the current CR3
+ * (several vas can share one frame). with capture, a write event also carries the
  * 16-byte window around the written address before the write and after
  * it: the hook single-steps the writing vcpu over the instruction and
  * reads the window again, so the callback runs on the step, not on the

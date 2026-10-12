@@ -1,5 +1,5 @@
 # librootview.so: the engine plus bind/rootview.c's flat api, for the python
-# bindings (src/ui/dynamic/rootview_web/backends/rvlib.py). built from the same
+# package (src/rootview/rvprimitives.py). built from the same
 # ../src/impl sources as rv, minus the command-line front ends (main.c, the
 # *_cli.c files and kvmi_shell.c), into a separate -fPIC object tree.
 # lands next to rv so the same $ORIGIN rpath finds the libvmi.so copied there.

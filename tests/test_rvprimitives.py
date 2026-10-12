@@ -1,50 +1,22 @@
-"""librootview.so through the ctypes bindings, against a real guest.
-
-Skipped unless the library loads (``make lib`` at the repo root) and a guest
-is up: ``ROOTVIEW_TEST_VM`` names it, otherwise the first running vm with a
-kvmi socket is used. Building the profile pauses the guest briefly.
-"""
+"""rootview.rvprimitives against a real guest (see conftest.py)."""
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
-from rootview_web.backends.base import BackendError
-
-rvlib = pytest.importorskip("rootview_web.backends.rvlib")
-
-try:
-    rvlib.lib()
-except BackendError as e:
-    pytest.skip(f"librootview.so not loadable: {e}", allow_module_level=True)
+from rootview import rvprimitives
+from rootview.rvprimitives import RootviewError
 
 
-def _guest_name() -> str | None:
-    if name := os.environ.get("ROOTVIEW_TEST_VM"):
-        return name
-    return next((v.name for v in rvlib.list_vms() if v.running and v.kvmi), None)
-
-
-@pytest.fixture(scope="module")
-def guest():
-    name = _guest_name()
-    if name is None:
-        pytest.skip("no running kvmi guest (set ROOTVIEW_TEST_VM)")
-    with rvlib.Guest(name) as g:
-        yield g
-
-
-def test_list_vms_returns_store_entries():
-    for vm in rvlib.list_vms():
+def test_list_vms_returns_store_entries(guest):
+    for vm in rvprimitives.list_vms():
         assert vm.name
         assert not (vm.kvmi and not vm.running)
 
 
-def test_unknown_vm_raises_backend_error():
-    with pytest.raises(BackendError):
-        rvlib.Guest("no-such-vm-rootview-test")
+def test_unknown_vm_raises_rootview_error(guest):
+    with pytest.raises(RootviewError):
+        rvprimitives.Guest("no-such-vm-rootview-test")
 
 
 def test_info(guest):
@@ -85,8 +57,8 @@ def test_read_matches_read_field(guest):
     assert raw.split(b"\0", 1)[0] == b"swapper/0"
 
 
-def test_bad_field_raises_backend_error(guest):
-    with pytest.raises(BackendError, match="no_such_member"):
+def test_bad_field_raises_rootview_error(guest):
+    with pytest.raises(RootviewError, match="no_such_member"):
         guest.field("task_struct", "no_such_member")
 
 
@@ -102,7 +74,7 @@ def test_list_matches_tasks(guest):
 
 def test_list_node_cap_raises(guest):
     off = guest.field("task_struct", "tasks").offset
-    with pytest.raises(BackendError, match="more than 2"):
+    with pytest.raises(RootviewError, match="more than 2"):
         guest.list(guest.info().init_task + off, "task_struct", "tasks", max=2)
 
 
@@ -130,7 +102,7 @@ def test_percpu_runqueues(guest):
         rq = guest.percpu_addr("runqueues", cpu)
         curr = guest.read_field("rq", "curr", rq).value
         assert guest.read_field("task_struct", "comm", curr).value
-    with pytest.raises(BackendError):
+    with pytest.raises(RootviewError):
         guest.percpu_addr("runqueues", n)
 
 
@@ -141,7 +113,7 @@ def test_events_start_empty(guest):
     assert all(e.name for e in events)
 
 
-# ---- the building blocks python-side detection (cross-views, integrity, hashing) uses ----
+# ---- the primitives rvtools builds on ----
 
 
 def test_symbols_sorted_and_sym_at(guest):
@@ -151,7 +123,7 @@ def test_symbols_sorted_and_sym_at(guest):
     init_task = guest.sym("init_task")
     sym, off = guest.sym_at(init_task + 8)
     assert (sym.name, sym.addr, off) == ("init_task", init_task, 8)
-    with pytest.raises(BackendError, match="kernel image"):
+    with pytest.raises(RootviewError, match="kernel image"):
         guest.sym_at(0x1000)
 
 
@@ -160,14 +132,14 @@ def test_types_and_enums(guest):
     assert guest.type_size("rb_node") == 24
     assert guest.enum_value("PIDTYPE_PID", "pid_type") == 0
     assert guest.enum_value("PIDTYPE_PID") == 0  # found without naming the enum
-    with pytest.raises(BackendError):
+    with pytest.raises(RootviewError):
         guest.enum_value("NO_SUCH_ENUMERATOR_ROOTVIEW")
 
 
 def test_registers_point_into_the_kernel(guest):
     sym, _ = guest.sym_at(guest.reg("msr_lstar"))
     assert sym.name.startswith("entry_SYSCALL_64")
-    with pytest.raises(BackendError, match="unknown register"):
+    with pytest.raises(RootviewError, match="unknown register"):
         guest.reg("no_such_reg")
 
 

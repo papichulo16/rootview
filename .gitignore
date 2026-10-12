@@ -8,3 +8,5 @@ build/pic/
 *.so.*
 
 __pycache__/
+*.egg-info/
+tests/

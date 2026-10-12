@@ -9,7 +9,6 @@
 #include "kern/kfield.h"
 #include "kern/kprof.h"
 #include "kern/kwalk.h"
-#include "kern/kwatch.h"
 #include "vm/vm_config.h"
 #include "vm/vm_state.h"
 #include "vm/vm_store.h"
@@ -26,9 +25,7 @@ _Static_assert((int) RV_HOOK_REGISTER == HOOK_KIND_REGISTER && (int) RV_HOOK_BRE
                    (int) RV_HOOK_MEM == HOOK_KIND_MEM,
                "rv_event kinds mirror hook_kind_t");
 _Static_assert(RV_NAME_MAX == VM_NAME_MAX && RV_NAME_MAX == HOOK_NAME_MAX, "rv names fit vm and hook names");
-_Static_assert(RV_WINDOW == HOOK_MEM_WINDOW && RV_WINDOW == KWATCH_WINDOW, "one capture window size");
-_Static_assert((int) RV_WATCH_SYSCALL == KWATCH_SYSCALL + 1 && (int) RV_WATCH_IDT == KWATCH_IDT + 1,
-               "rv watch values are kwatch_table_t + 1");
+_Static_assert(RV_WINDOW == HOOK_MEM_WINDOW, "one capture window size");
 
 /* rv_tasks' own cap on the task list */
 #define TASKS_MAX 65536
@@ -38,14 +35,6 @@ struct rv_handle {
     kprof_t kp;
     kwalk_t w; /* every read goes through it, so a snapshot window caches them all */
     hook_manager_t hooks;
-
-    /* rv_watch_tables: each table's frames, and the hooks' user_data */
-    kwatch_region_t watch[KWATCH_TABLES];
-    struct watch_ctx {
-        rv_handle_t *h;
-        int table;
-    } watch_ctx[KWATCH_TABLES];
-    bool watching;
 
     /* the hook event ring: events[(head + i) % RV_EVENTS_MAX] for i < count */
     rv_event_t events[RV_EVENTS_MAX];
@@ -418,8 +407,7 @@ static rv_event_t *push(rv_handle_t *h, const hook_event_t *ev) {
                        .rip = ev->rip,
                        .captured = ev->mem_captured,
                        .after_ok = ev->mem_after_ok,
-                       .window = ev->mem_window,
-                       .slot = -1};
+                       .window = ev->mem_window};
     snprintf(e->name, sizeof(e->name), "%s", ev->name ? ev->name : "");
     if (ev->kind == HOOK_KIND_MEM) name_into(h, ev->rip, e->rip_sym, sizeof(e->rip_sym), &e->rip_off);
     memcpy(e->before, ev->mem_before, sizeof(e->before));
@@ -431,25 +419,6 @@ static void push_event(const hook_event_t *ev, void *user_data) {
     push(user_data, ev);
 }
 
-/* a write to a watched table: decoded into which slot and what it pointed at */
-static void push_watch_event(const hook_event_t *ev, void *user_data) {
-    const struct watch_ctx *c = user_data;
-    rv_handle_t *h = c->h;
-    rv_event_t *e = push(h, ev);
-    e->watch = c->table + 1;
-    kwatch_write_t w;
-    if (!ev->mem_captured ||
-        kwatch_decode(&h->kp, &h->watch[c->table], ev->mem_gpa, ev->mem_before, ev->mem_after, ev->rip, &w, NULL,
-                      0) != 0)
-        return;
-    e->slot = w.slot;
-    e->slot_va = w.va;
-    if (w.slot < 0) return;
-    e->old_value = w.old_target;
-    e->new_value = w.new_target;
-    name_into(h, w.old_target, e->old_sym, sizeof(e->old_sym), &e->old_off);
-    name_into(h, w.new_target, e->new_sym, sizeof(e->new_sym), &e->new_off);
-}
 
 /* bp and mem walk the vcpu's page tables to place the hook: pause around
  * that, unless a snapshot window already has the vm paused */
@@ -489,6 +458,11 @@ API int rv_hook_mem(rv_handle_t *h, const char *name, uint64_t va, const char *a
                              err_len);
 }
 
+API int rv_hook_mem_gfn(rv_handle_t *h, const char *name, uint64_t gfn, const char *access, int capture, char *err,
+                        size_t err_len) {
+    return hook_mem_add_gfn(&h->hooks, name, gfn, access, capture != 0, push_event, h, err, err_len);
+}
+
 API int rv_hook_remove(rv_handle_t *h, const char *name, char *err, size_t err_len) {
     return hook_remove(&h->hooks, name, err, err_len);
 }
@@ -497,53 +471,6 @@ API int rv_hook_poll(rv_handle_t *h, uint32_t timeout_ms, char *err, size_t err_
     return hook_poll(&h->hooks, timeout_ms, err, err_len);
 }
 
-static void watch_name(char *out, size_t len, int table, size_t i) {
-    snprintf(out, len, "watch:%s:%zu", kwatch_table_name((kwatch_table_t) table), i);
-}
-
-API int rv_unwatch_tables(rv_handle_t *h, char *err, size_t err_len) {
-    int rc = 0;
-    for (int t = 0; h->watching && t < KWATCH_TABLES; t++)
-        for (size_t i = 0; i < h->watch[t].npages; i++) {
-            char name[HOOK_NAME_MAX], e[256];
-            watch_name(name, sizeof(name), t, i);
-            if (hook_remove(&h->hooks, name, e, sizeof(e)) != 0 && rc == 0) {
-                set_err(err, err_len, e);
-                rc = -1;
-            }
-        }
-    h->watching = false;
-    return rc;
-}
-
-API int rv_watch_tables(rv_handle_t *h, char *err, size_t err_len) {
-    if (h->watching) {
-        set_err(err, err_len, "the tables are already watched");
-        return -1;
-    }
-    uint64_t idtr_base;
-    if (pause_for_hook(h, err, err_len) != 0) return -1;
-    int rc = vmi_read_reg(&h->session, IDTR_BASE, &idtr_base, err, err_len);
-    if (rc == 0) rc = kwatch_regions(&h->kp, idtr_base, h->watch, err, err_len);
-    if (rc != 0) {
-        memset(h->watch, 0, sizeof(h->watch));
-        return resume_after_hook(h, rc, err, err_len);
-    }
-    h->watching = true; /* so a partial failure unwinds what got registered */
-    for (int t = 0; rc == 0 && t < KWATCH_TABLES; t++) {
-        h->watch_ctx[t] = (struct watch_ctx) {h, t};
-        for (size_t i = 0; rc == 0 && i < h->watch[t].npages; i++) {
-            char name[HOOK_NAME_MAX];
-            watch_name(name, sizeof(name), t, i);
-            rc = hook_mem_add_gfn(&h->hooks, name, h->watch[t].gfn[i], "w", true, push_watch_event, &h->watch_ctx[t],
-                                  err, err_len);
-            if (rc != 0) h->watch[t].npages = i; /* only those got hooks */
-        }
-        for (int u = t + 1; rc != 0 && u < KWATCH_TABLES; u++) h->watch[u].npages = 0;
-    }
-    if (rc != 0) rv_unwatch_tables(h, NULL, 0);
-    return resume_after_hook(h, rc, err, err_len);
-}
 
 API int rv_events(rv_handle_t *h, rv_event_t *out, size_t max, size_t *n, uint64_t *dropped, char *err,
                   size_t err_len) {
