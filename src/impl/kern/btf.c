@@ -281,18 +281,18 @@ void btf_free(btf_t *btf) {
 /* ---- finding it in the image ---- */
 
 /* the loaded run holding va, or NULL */
-static const pt_run_t *run_at(const pt_image_t *img, uint64_t va) {
+static const kimg_run_t *run_at(const kimg_t *img, uint64_t va) {
     for (size_t i = 0; i < img->n_runs; i++) {
-        const pt_run_t *r = &img->runs[i];
+        const kimg_run_t *r = &img->runs[i];
         if (r->data && va >= r->va && va - r->va < r->len) return r;
     }
     return NULL;
 }
 
 /* the blob at va, at most max bytes of it: header check and full parse */
-static bool try_blob(const pt_image_t *img, uint64_t va, uint64_t max, btf_t *out, char *err, size_t err_len) {
-    const pt_run_t *r = run_at(img, va);
-    if (!r) FAIL("0x%" PRIx64 " isn't in a loaded NX run", va);
+static bool try_blob(const kimg_t *img, uint64_t va, uint64_t max, btf_t *out, char *err, size_t err_len) {
+    const kimg_run_t *r = run_at(img, va);
+    if (!r) FAIL("0x%" PRIx64 " isn't in the copied image", va);
     uint64_t room = r->len - (va - r->va);
     if (room > max) room = max;
     const unsigned char *p = r->data + (va - r->va);
@@ -303,7 +303,7 @@ static bool try_blob(const pt_image_t *img, uint64_t va, uint64_t max, btf_t *ou
     return true;
 }
 
-static bool locate(const pt_image_t *img, const ksym_table_t *tab, btf_t *out, char *err, size_t err_len) {
+static bool locate(const kimg_t *img, const ksym_table_t *tab, btf_t *out, char *err, size_t err_len) {
     char sym_err[256] = "";
     const ksym_t *start = tab ? ksym_by_name(tab, "__start_BTF") : NULL;
     const ksym_t *stop = tab ? ksym_by_name(tab, "__stop_BTF") : NULL;
@@ -324,8 +324,8 @@ static bool locate(const pt_image_t *img, const ksym_table_t *tab, btf_t *out, c
     int hits = 0;
     char last[200] = "";
     for (size_t i = 0; i < img->n_runs; i++) {
-        const pt_run_t *r = &img->runs[i];
-        if (!r->nx || !r->data) continue;
+        const kimg_run_t *r = &img->runs[i];
+        if (!r->data) continue;
         const unsigned char *p = r->data, *end = r->data + r->len;
         while ((p = memmem(p, (size_t) (end - p), BTF_MAGIC_BYTES, BTF_MAGIC_LEN)) != NULL) {
             uint64_t va = r->va + (uint64_t) (p - r->data);
@@ -349,10 +349,10 @@ static bool locate(const pt_image_t *img, const ksym_table_t *tab, btf_t *out, c
         *out = best;
         return true;
     }
-    FAIL("%sscan: %d header hit(s) in the NX runs, none parsed%s", sym_err, hits, last);
+    FAIL("%sscan: %d header hit(s) in the image, none parsed%s", sym_err, hits, last);
 }
 
-int btf_find_blob(const pt_image_t *img, const ksym_table_t *tab, uint64_t *va, uint64_t *len, bool *by_symbol,
+int btf_find_blob(const kimg_t *img, const ksym_table_t *tab, uint64_t *va, uint64_t *len, bool *by_symbol,
                   char *err, size_t err_len) {
     btf_t b;
     if (!locate(img, tab, &b, err, err_len)) return -1;
@@ -363,7 +363,7 @@ int btf_find_blob(const pt_image_t *img, const ksym_table_t *tab, uint64_t *va, 
     return 0;
 }
 
-int btf_load(const pt_image_t *img, const ksym_table_t *tab, btf_t *btf, char *err, size_t err_len) {
+int btf_load(const kimg_t *img, const ksym_table_t *tab, btf_t *btf, char *err, size_t err_len) {
     *btf = (btf_t) {0};
     return locate(img, tab, btf, err, err_len) ? 0 : -1;
 }

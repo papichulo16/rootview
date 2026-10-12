@@ -272,7 +272,7 @@ static bool build_hash(ksym_table_t *tab) {
     return true;
 }
 
-static bool decode(const view_t *v, const pt_image_t *img, const ksym_cfg_t *cfg, const tokens_t *t, const names_t *nm,
+static bool decode(const view_t *v, const kimg_t *img, const ksym_cfg_t *cfg, const tokens_t *t, const names_t *nm,
                    uint64_t offsets, uint64_t relbase_va, ksym_table_t *tab, char *err, size_t err_len) {
     uint64_t base;
     if (!rd64(v, relbase_va, &base)) FAIL("kallsyms_relative_base at 0x%" PRIx64 " isn't loaded", relbase_va);
@@ -335,7 +335,7 @@ static bool decode(const view_t *v, const pt_image_t *img, const ksym_cfg_t *cfg
 /* one candidate token table at hit, all the way through. *real is set once
  * the token table itself checks out, so the caller can report the error
  * from a real table over the ones from stray digit runs. */
-static bool try_hit(const view_t *v, const pt_image_t *img, const ksym_cfg_t *cfg, uint64_t hit, ksym_table_t *tab,
+static bool try_hit(const view_t *v, const kimg_t *img, const ksym_cfg_t *cfg, uint64_t hit, ksym_table_t *tab,
                     bool *real, char *err, size_t err_len) {
     tokens_t t;
     *real = false;
@@ -379,15 +379,15 @@ static bool try_hit(const view_t *v, const pt_image_t *img, const ksym_cfg_t *cf
     return true;
 }
 
-int ksym_load(const pt_image_t *img, const ksym_cfg_t *cfg, ksym_table_t *tab, char *err, size_t err_len) {
+int ksym_load(const kimg_t *img, const ksym_cfg_t *cfg, ksym_table_t *tab, char *err, size_t err_len) {
     *tab = (ksym_table_t) {0};
     char last[512] = "";
     int candidates = 0;
     bool have_real = false;
 
     for (size_t r = 0; r < img->n_runs; r++) {
-        const pt_run_t *run = &img->runs[r];
-        if (!run->nx || !run->data || run->len < DIGITS_LEN) continue;
+        const kimg_run_t *run = &img->runs[r];
+        if (!run->data || run->len < DIGITS_LEN) continue;
         view_t v = {.p = run->data, .va = run->va, .len = run->len};
 
         const unsigned char *p = run->data, *end = run->data + run->len;
@@ -405,7 +405,7 @@ int ksym_load(const pt_image_t *img, const ksym_cfg_t *cfg, ksym_table_t *tab, c
     }
 
     if (err) {
-        if (!candidates) snprintf(err, err_len, "no token_table (\"0\" .. \"9\") in the image's NX pages");
+        if (!candidates) snprintf(err, err_len, "no token_table (\"0\" .. \"9\") in the image");
         else snprintf(err, err_len, "%d token_table candidate(s) rejected for %s/%s; %s", candidates,
                       ksym_layout_name(cfg->layout), ksym_addr_name(cfg->addr), last);
     }
@@ -481,11 +481,11 @@ int ksym_cfg_from_banner(const char *banner, ksym_cfg_t *cfg, char *err, size_t 
     return 0;
 }
 
-size_t ksym_banner_scan(const pt_image_t *img, uint64_t *hits, size_t max) {
+size_t ksym_banner_scan(const kimg_t *img, uint64_t *hits, size_t max) {
     size_t n = 0, bl = strlen(BANNER);
     for (size_t r = 0; r < img->n_runs; r++) {
-        const pt_run_t *run = &img->runs[r];
-        if (!run->nx || !run->data) continue;
+        const kimg_run_t *run = &img->runs[r];
+        if (!run->data) continue;
         const unsigned char *p = run->data, *end = run->data + run->len;
         while ((p = memmem(p, (size_t) (end - p), BANNER, bl)) != NULL) {
             if (n < max) hits[n] = run->va + (uint64_t) (p - run->data);
@@ -496,7 +496,7 @@ size_t ksym_banner_scan(const pt_image_t *img, uint64_t *hits, size_t max) {
     return n;
 }
 
-int ksym_check_banner(const pt_image_t *img, const ksym_table_t *tab, char *banner, size_t banner_len, char *err,
+int ksym_check_banner(const kimg_t *img, const ksym_table_t *tab, char *banner, size_t banner_len, char *err,
                       size_t err_len) {
     const ksym_t *s = ksym_by_name(tab, "linux_banner");
     if (!s) {
@@ -504,15 +504,15 @@ int ksym_check_banner(const pt_image_t *img, const ksym_table_t *tab, char *bann
         return -1;
     }
 
-    const unsigned char *p = pt_image_ptr(img, s->addr, 1);
+    const unsigned char *p = kimg_ptr(img, s->addr, 1);
     if (!p) {
-        if (err) snprintf(err, err_len, "linux_banner 0x%" PRIx64 " isn't in a loaded NX run", s->addr);
+        if (err) snprintf(err, err_len, "linux_banner 0x%" PRIx64 " isn't in the copied image", s->addr);
         return -1;
     }
     /* the string has to end inside the same run */
     size_t room = 0;
-    while (pt_image_ptr(img, s->addr, room + 1) && room < 4096 && p[room]) room++;
-    if (!pt_image_ptr(img, s->addr, room + 1) || p[room]) {
+    while (kimg_ptr(img, s->addr, room + 1) && room < 4096 && p[room]) room++;
+    if (!kimg_ptr(img, s->addr, room + 1) || p[room]) {
         if (err) snprintf(err, err_len, "linux_banner 0x%" PRIx64 " isn't NUL-terminated", s->addr);
         return -1;
     }

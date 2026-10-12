@@ -7,8 +7,4 @@ build/pic/
 *.so
 *.so.*
 
-# ram dumps: publish mem.raw.zst as a release asset, never commit
-tests/fixtures/*/mem.raw
-tests/fixtures/*/mem.raw.zst
 __pycache__/
-build/test/

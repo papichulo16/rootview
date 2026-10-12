@@ -11,7 +11,7 @@
 /* fields of kernel structs by name. kfield_resolve is pure BTF work - no
  * guest reads - so a caller resolves each (type, path) once and keeps the
  * kfield_t. kfield_read reads one field; for many fields of one struct, read
- * the struct once with kprof_read and kfield_decode each field out of the
+ * the struct once with vmi_read_virt and kfield_decode each field out of the
  * buffer. pointers are never followed: a PTR value carries its pointee's
  * type id, and the caller reads the next struct itself. */
 

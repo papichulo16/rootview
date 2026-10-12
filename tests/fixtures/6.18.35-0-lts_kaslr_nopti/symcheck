@@ -1,9 +1,0 @@
-ffffffffa6136a20 D linux_banner
-ffffffffa6c36000 T init_top_pgt
-ffffffffa6c12940 T init_task
-ffffffffa6d08c20 t prog_idr
-ffffffffa6000280 D sys_call_table
-ffffffffa5000080 T entry_SYSCALL_64
-ffffffffa662e000 R __start_BTF
-ffffffffa6afdd0d R __stop_BTF
-ffffffffa6c40010 T phys_base

@@ -52,7 +52,7 @@ void kwalk_free(kwalk_t *w);
 int kwalk_begin(kwalk_t *w, char *err, size_t err_len);
 int kwalk_end(kwalk_t *w, char *err, size_t err_len);
 
-/* kprof_read through the cache when in a window */
+/* vmi_read_virt, through the cache when in a window */
 int kwalk_read(kwalk_t *w, uint64_t va, void *buf, size_t len, char *err, size_t err_len);
 
 typedef struct {

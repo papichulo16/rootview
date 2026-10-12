@@ -58,7 +58,6 @@ class _Info(ctypes.Structure):
         ("patch", ctypes.c_uint32),
         ("image_start", ctypes.c_uint64),
         ("image_end", ctypes.c_uint64),
-        ("root_pgd", ctypes.c_uint64),
         ("nsyms", ctypes.c_uint64),
         ("btf_types", ctypes.c_uint32),
         ("init_task", ctypes.c_uint64),
@@ -157,7 +156,6 @@ class KernelInfo:
     release: str
     version: tuple[int, int, int]
     image: tuple[int, int]
-    root_pgd: int
     nsyms: int
     btf_types: int
     init_task: int
@@ -371,7 +369,6 @@ class Guest:
             release=_text(i.release),
             version=(i.major, i.minor, i.patch),
             image=(i.image_start, i.image_end),
-            root_pgd=i.root_pgd,
             nsyms=i.nsyms,
             btf_types=i.btf_types,
             init_task=i.init_task,

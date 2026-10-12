@@ -8,15 +8,12 @@
 #include "kern/kprof.h"
 
 /* the tables worth write-protecting, as guest frames, and what a write to
- * one of those frames did. kcheck finds a table already patched when it
- * polls; an EPT write hook on these frames (hook_mem_add_gfn) catches the
- * moment of patching, with the instruction that did it. both are needed:
- * the hook sees nothing that happened before it was attached, and the
- * poll sees nothing about who did it.
+ * one of those frames did. an EPT write hook on these frames
+ * (hook_mem_add_gfn) catches the moment of patching, with the instruction
+ * that did it - but nothing that happened before it was attached.
  *
- * this half is offline - frames come from kprof's canonical root, and a
- * write is decoded from its gpa and the bytes before and after - so it's
- * tested against dumps. the hook half lives in kvmi/hook and bind. */
+ * frames come from vmi_translate_virt, and a write is decoded from its gpa
+ * and the bytes before and after. the hook half lives in kvmi/hook and bind. */
 
 typedef enum {
     KWATCH_SYSCALL, /* sys_call_table: 8-byte entries */

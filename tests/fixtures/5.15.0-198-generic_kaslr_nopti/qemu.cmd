@@ -1,1 +1,0 @@
-qemu-system-x86_64 -enable-kvm -cpu host -m 1024 -smp 1 -kernel boot/vmlinuz-5.15.0-198-generic -initrd initrd.gz -append console=ttyS0,115200 -drive file=$WORK/out.img,format=raw,if=virtio -display none -net none -serial unix:$WORK/s,server=on,wait=off -monitor unix:$WORK/m,server=on,wait=off

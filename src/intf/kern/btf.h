@@ -6,7 +6,7 @@
 #include <stdint.h>
 
 #include "kern/ksym.h"
-#include "kern/pt.h"
+#include "kern/kimg.h"
 
 /* the kernel's own BTF (.BTF, what /sys/kernel/btf/vmlinux serves), copied
  * out of the guest once and parsed host-side. the blob is guest data, so
@@ -83,14 +83,14 @@ typedef struct {
 } btf_member_t;
 
 /* finds .BTF in the image: [__start_BTF, __stop_BTF) when tab (optional) has
- * both and a valid header sits there, otherwise a scan of the loaded NX runs
+ * both and a valid header sits there, otherwise a scan of the copied image
  * for BTF_MAGIC_BYTES, keeping the largest blob that parses. len is the
  * length the header gives. */
-int btf_find_blob(const pt_image_t *img, const ksym_table_t *tab, uint64_t *va, uint64_t *len, bool *by_symbol,
+int btf_find_blob(const kimg_t *img, const ksym_table_t *tab, uint64_t *va, uint64_t *len, bool *by_symbol,
                   char *err, size_t err_len);
 
 /* btf_find_blob, then copies the blob out of the loaded runs and parses it */
-int btf_load(const pt_image_t *img, const ksym_table_t *tab, btf_t *btf, char *err, size_t err_len);
+int btf_load(const kimg_t *img, const ksym_table_t *tab, btf_t *btf, char *err, size_t err_len);
 
 /* parses a copy of data[0, len) */
 int btf_parse(const void *data, size_t len, btf_t *btf, char *err, size_t err_len);

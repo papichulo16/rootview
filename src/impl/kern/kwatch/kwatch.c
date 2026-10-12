@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "vmi/vmi.h"
+
 #define FAIL(...)                                                                                                      \
     do {                                                                                                               \
         if (err) snprintf(err, err_len, __VA_ARGS__);                                                                  \
@@ -35,7 +37,7 @@ static int frames(const kprof_t *kp, kwatch_region_t *r, uint64_t extent, char *
         if (r->npages == KWATCH_MAX_PAGES) FAIL("%s spans more than %d pages", kwatch_table_name(r->table), KWATCH_MAX_PAGES);
         uint64_t pa;
         char e[200];
-        if (pt_translate(&kp->mem, &kp->root, p, &pa, NULL, e, sizeof(e)) != 0)
+        if (vmi_translate_virt(kp->session, p, &pa, e, sizeof(e)) != 0)
             FAIL("%s page 0x%016" PRIx64 ": %s", kwatch_table_name(r->table), p, e);
         r->page_va[r->npages] = p;
         r->gfn[r->npages++] = pa / PAGE;
@@ -53,7 +55,7 @@ int kwatch_regions(const kprof_t *kp, uint64_t idtr_base, kwatch_region_t out[KW
     uint64_t extent = next ? next - sct->addr : SYSCALL_MAX * 8;
     if (extent > SYSCALL_MAX * 8) extent = SYSCALL_MAX * 8;
     uint64_t tab[SYSCALL_MAX];
-    if (kprof_read(kp, sct->addr, tab, extent & ~7ull, err, err_len) != 0) return -1;
+    if (vmi_read_virt(kp->session, sct->addr, tab, extent & ~7ull, err, err_len) != 0) return -1;
     size_t n = 0;
     while (n < extent / 8 && tab[n]) n++;
     out[KWATCH_SYSCALL] = (kwatch_region_t) {.table = KWATCH_SYSCALL, .va = sct->addr, .len = n * 8, .slot_size = 8};
@@ -76,7 +78,7 @@ static uint64_t gate_handler(const uint8_t *d) {
 
 static const char *name_at(const kprof_t *kp, uint64_t addr, uint64_t *off) {
     *off = 0;
-    if (addr < kp->img.start || addr >= kp->img.end) return NULL;
+    if (addr < kp->img_start || addr >= kp->img_end) return NULL;
     const ksym_t *s = ksym_by_addr(&kp->ksym, addr, off);
     if (!s) *off = 0;
     return s ? s->name : NULL;

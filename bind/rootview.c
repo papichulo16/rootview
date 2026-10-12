@@ -113,9 +113,8 @@ API int rv_info(rv_handle_t *h, rv_info_t *out, char *err, size_t err_len) {
     *out = (rv_info_t) {.major = kp->major,
                         .minor = kp->minor,
                         .patch = kp->patch,
-                        .image_start = kp->img.start,
-                        .image_end = kp->img.end,
-                        .root_pgd = kp->root.pgd,
+                        .image_start = kp->img_start,
+                        .image_end = kp->img_end,
                         .nsyms = kp->ksym.n,
                         .btf_types = kp->btf.n,
                         .init_task = kp->init_task};
@@ -271,7 +270,7 @@ API int rv_idr(rv_handle_t *h, uint64_t idr, rv_idr_entry_t *out, size_t max, si
 
 static void name_into(const rv_handle_t *h, uint64_t addr, char *out, size_t out_len, uint64_t *off) {
     const kprof_t *kp = &h->kp;
-    const ksym_t *s = addr >= kp->img.start && addr < kp->img.end ? ksym_by_addr(&kp->ksym, addr, off) : NULL;
+    const ksym_t *s = addr >= kp->img_start && addr < kp->img_end ? ksym_by_addr(&kp->ksym, addr, off) : NULL;
     snprintf(out, out_len, "%s", s ? s->name : "");
     if (!s) *off = 0;
 }
@@ -406,10 +405,10 @@ API int rv_watch_tables(rv_handle_t *h, char *err, size_t err_len) {
         set_err(err, err_len, "the tables are already watched");
         return -1;
     }
-    kprof_regs_t regs;
+    uint64_t idtr_base;
     if (pause_for_hook(h, err, err_len) != 0) return -1;
-    int rc = kprof_read_regs(&h->kp, &regs, err, err_len);
-    if (rc == 0) rc = kwatch_regions(&h->kp, regs.idtr_base, h->watch, err, err_len);
+    int rc = vmi_read_reg(&h->session, IDTR_BASE, &idtr_base, err, err_len);
+    if (rc == 0) rc = kwatch_regions(&h->kp, idtr_base, h->watch, err, err_len);
     if (rc != 0) {
         memset(h->watch, 0, sizeof(h->watch));
         return resume_after_hook(h, rc, err, err_len);

@@ -4,9 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "kern/pt.h"
+#include "kern/kimg.h"
 
-/* kallsyms decoder over the image's loaded NX runs (pt_image_read_nx). the
+/* kallsyms decoder over the copied kernel image (kimg_load). the
  * tables are found by content, not by symbol, since kallsyms is how symbols
  * get found in the first place. two switches pick the decoder, and a wrong
  * pick is rejected rather than decoded into garbage. */
@@ -58,16 +58,16 @@ int ksym_cfg_from_banner(const char *banner, ksym_cfg_t *cfg, char *err, size_t 
 
 /* raw scan of the loaded runs for "Linux version ". fills up to max hit
  * addresses and returns how many there were in total. */
-size_t ksym_banner_scan(const pt_image_t *img, uint64_t *hits, size_t max);
+size_t ksym_banner_scan(const kimg_t *img, uint64_t *hits, size_t max);
 
 /* finds and decodes the tables. on top of the structural checks, the
  * addresses must be non-decreasing and _text must decode to img->start. */
-int ksym_load(const pt_image_t *img, const ksym_cfg_t *cfg, ksym_table_t *tab, char *err, size_t err_len);
+int ksym_load(const kimg_t *img, const ksym_cfg_t *cfg, ksym_table_t *tab, char *err, size_t err_len);
 
 /* resolves linux_banner, reads it out of the loaded runs and checks it
  * against the raw scan: it must be one of the hits. banner (optional) gets
  * the string, NUL-terminated and cut to banner_len. */
-int ksym_check_banner(const pt_image_t *img, const ksym_table_t *tab, char *banner, size_t banner_len, char *err,
+int ksym_check_banner(const kimg_t *img, const ksym_table_t *tab, char *banner, size_t banner_len, char *err,
                       size_t err_len);
 
 /* first symbol with that name, in address order */

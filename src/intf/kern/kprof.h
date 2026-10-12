@@ -5,67 +5,39 @@
 #include <stdint.h>
 
 #include "kern/btf.h"
-#include "kern/kmem.h"
 #include "kern/ksym.h"
-#include "kern/pt.h"
 #include "vmi/vmi_types.h"
 
-/* the kernel profile: everything the later layers need to read the guest's
- * kernel by name - the canonical page-table root, the image, kallsyms and
- * BTF - built once by kprof_init from nothing but guest memory and a vcpu's
- * registers. */
-
-typedef struct {
-    uint64_t cr3, cr4, lstar, idtr_base;
-} kprof_regs_t;
-
-/* khash's page-hash baseline (khash.h): NULL until khash_baseline */
-struct khash_baseline;
+/* the kernel profile: kallsyms and BTF decoded out of an attached vm's
+ * kernel image, so the guest's kernel can be read by name. guest memory is
+ * read through the vmi module (vmi_read_virt). */
 
 typedef struct {
     vmi_session_t *session; /* borrowed: kprof_free doesn't detach it */
-    kmem_t mem;             /* the session's physical reads, for the page walks */
-    kprof_regs_t regs;     /* as read at init */
-    pt_root_t vcpu_root;   /* the kernel root derived from CR3 */
-    pt_root_t root;        /* init_top_pgt: what every read after init goes through */
-    pt_image_t img;
+    uint64_t img_start, img_end;
     ksym_table_t ksym;
     btf_t btf;
     char banner[512];
     char release[65]; /* "6.18.35-0-lts", what uname -r says */
     unsigned major, minor, patch;
     uint64_t init_task;
-    struct khash_baseline *hash; /* one allocation: kprof_free frees it */
 } kprof_t;
 
 /* the init sequence, each step's failure reported as "step N (what): ...":
- *    1 pause the vm
- *    2 read CR3, CR4, LSTAR and IDTR
- *    3 choose the kernel root from CR3; 5-level paging is rejected
- *    4 find the image and load its NX runs
- *    5 find and decode kallsyms, with the switches the raw banner picks
- *    6 cross-check linux_banner against the raw scan and parse the release
- *    7 find and parse BTF
- *    8 switch to init_top_pgt: it must map the image and the IDT the same
- *      way the vcpu's root does, and IDT[0] must point into the image
- *    9 read init_task.comm through it: "swapper/0"
- *   10 resume the vm
+ *   1 pause the vm
+ *   2 read MSR_LSTAR
+ *   3 copy the image, found from LSTAR
+ *   4 find and decode kallsyms, with the switches the raw banner picks
+ *   5 cross-check linux_banner against the raw scan and parse the release
+ *   6 find and parse BTF
+ *   7 read init_task.comm: "swapper/0"
+ *   8 resume the vm
  * the vm is resumed on failure too, if it was paused. */
 int kprof_init(kprof_t *kp, vmi_session_t *session, char *err, size_t err_len);
 
-/* the step kprof_init's error came from, for callers that report it apart */
-#define KPROF_STEPS 10
+#define KPROF_STEPS 8
 const char *kprof_step_name(int step);
 
 void kprof_free(kprof_t *kp);
-
-/* reads len bytes of kernel virtual memory through the canonical root: one
- * call for a whole struct, which kfield_decode then slices. page by page
- * underneath, so a struct costs a read per page it touches rather than one
- * per field. */
-int kprof_read(const kprof_t *kp, uint64_t va, void *buf, size_t len, char *err, size_t err_len);
-
-/* CR3, CR4, LSTAR and IDTR of vcpu 0, as they are now */
-int kprof_read_regs(const kprof_t *kp, kprof_regs_t *regs, char *err, size_t err_len);
 
 #endif

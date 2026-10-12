@@ -35,7 +35,6 @@ typedef struct {
     char release[65];
     uint32_t major, minor, patch;
     uint64_t image_start, image_end;
-    uint64_t root_pgd; /* init_top_pgt */
     uint64_t nsyms;    /* kallsyms */
     uint32_t btf_types;
     uint64_t init_task;
@@ -175,8 +174,7 @@ int rv_events(rv_handle_t *h, rv_event_t *out, size_t max, size_t *n, uint64_t *
  * IDTR), with capture: each write lands in the ring as a MEM event with
  * watch set, the slot it hit, the target before and after, and the rip
  * that wrote, all named. hooks are "watch:<table>:<n>", one per frame.
- * this is the event half; keep polling kcheck/khash too, since a table
- * patched before the watch went on raises nothing here. */
+ * a table patched before the watch went on raises nothing here. */
 int rv_watch_tables(rv_handle_t *h, char *err, size_t err_len);
 int rv_unwatch_tables(rv_handle_t *h, char *err, size_t err_len);
 

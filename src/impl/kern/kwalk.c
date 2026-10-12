@@ -86,7 +86,7 @@ static const unsigned char *cache_page(kwalk_t *w, uint64_t page, bool *full, ch
         *full = true;
         return NULL;
     }
-    if (kprof_read(w->kp, page, data, PAGE, err, err_len) != 0) {
+    if (vmi_read_virt(w->kp->session, page, data, PAGE, err, err_len) != 0) {
         free(data);
         return NULL;
     }
@@ -96,7 +96,7 @@ static const unsigned char *cache_page(kwalk_t *w, uint64_t page, bool *full, ch
 }
 
 int kwalk_read(kwalk_t *w, uint64_t va, void *buf, size_t len, char *err, size_t err_len) {
-    if (!w->in_window) return kprof_read(w->kp, va, buf, len, err, err_len);
+    if (!w->in_window) return vmi_read_virt(w->kp->session, va, buf, len, err, err_len);
     if (va + len < va) FAIL("read of %zu bytes at 0x%016" PRIx64 " wraps", len, va);
     unsigned char *out = buf;
     while (len) {
@@ -105,7 +105,7 @@ int kwalk_read(kwalk_t *w, uint64_t va, void *buf, size_t len, char *err, size_t
         bool full;
         const unsigned char *p = cache_page(w, page, &full, err, err_len);
         if (p) memcpy(out, p + off, chunk);
-        else if (!full || kprof_read(w->kp, va, out, chunk, err, err_len) != 0) return -1;
+        else if (!full || vmi_read_virt(w->kp->session, va, out, chunk, err, err_len) != 0) return -1;
         va += chunk, out += chunk, len -= chunk;
     }
     return 0;

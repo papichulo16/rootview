@@ -1,9 +1,11 @@
 #include "kvmi/kvmi_shell.h"
 
 #include <ctype.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "hook/hook.h"
@@ -34,9 +36,10 @@ static void print_help(void) {
            "  regs                        dump the common registers\n"
            "\n"
            "kernel profile commands (prof pauses and resumes the vm):\n"
-           "  prof                        build the kernel profile: root, kallsyms, BTF\n"
+           "  prof                        build the kernel profile: kallsyms, BTF\n"
            "  tasks                       walk init_task.tasks: pid and comm of each process\n"
-           "  field <type> <path> [vaddr hex]\n"
+           "  sym <name | vaddr hex>      a symbol's address, or the symbol an address is in\n"
+           "  field <type> <path> [vaddr hex | symbol]\n"
            "                              resolve a struct field (\"task_struct se.vruntime\")\n"
            "                              and, given the struct's address, read it\n"
            "\n"
@@ -438,9 +441,7 @@ static void cmd_prof(vmi_session_t *session, prof_state_t *ps) {
     kprof_t *kp = &ps->kp;
     printf("%s\n", kp->banner);
     printf("  release      %s (%u.%u.%u)\n", kp->release, kp->major, kp->minor, kp->patch);
-    printf("  image        0x%016" PRIx64 "-0x%016" PRIx64 "\n", kp->img.start, kp->img.end);
-    printf("  vcpu root    0x%" PRIx64 " (cr3 0x%" PRIx64 ")\n", kp->vcpu_root.pgd, kp->regs.cr3);
-    printf("  init_top_pgt 0x%" PRIx64 "\n", kp->root.pgd);
+    printf("  image        0x%016" PRIx64 "-0x%016" PRIx64 "\n", kp->img_start, kp->img_end);
     printf("  kallsyms     %zu symbols\n", kp->ksym.n);
     printf("  btf          %u types at 0x%016" PRIx64 " (%s)\n", kp->btf.n, kp->btf.va,
            kp->btf.by_symbol ? "__start_BTF" : "scan");
@@ -486,12 +487,70 @@ static void cmd_tasks(prof_state_t *ps) {
     kwalk_free(&w);
 }
 
+/* a symbol name first, so a name that happens to be hex ("add") still resolves */
+static int parse_kaddr(const kprof_t *kp, const char *arg, uint64_t *va) {
+    int rc = -1;
+    const ksym_t *s = ksym_by_name(&kp->ksym, arg);
+    if (s) {
+        *va = s->addr;
+        rc = 0;
+        goto out;
+    }
+
+    char *end;
+    errno = 0;
+    uint64_t v = strtoull(arg, &end, 16);
+    if (errno == 0 && end != arg && *end == '\0') {
+        *va = v;
+        rc = 0;
+    }
+
+out:
+    return rc;
+}
+
+static void cmd_sym(prof_state_t *ps, const char *args) {
+    char arg[256];
+    uint64_t va, off;
+    if (sscanf(args, "%255s", arg) != 1) {
+        printf("usage: sym <name | vaddr hex>\n");
+        goto out;
+    }
+    if (!ps->ready) {
+        printf("error: run 'prof' first\n");
+        goto out;
+    }
+
+    const kprof_t *kp = &ps->kp;
+    const ksym_t *s = ksym_by_name(&kp->ksym, arg);
+    if (s) {
+        printf("%s = 0x%016" PRIx64 " (%c)\n", s->name, s->addr, s->type);
+        goto out;
+    }
+    if (parse_kaddr(kp, arg, &va) != 0) {
+        printf("error: no symbol %s, and it isn't a hex address\n", arg);
+        goto out;
+    }
+    /* outside the image the nearest symbol is meaningless: the absolute
+     * per-cpu ones start at 0 */
+    if (va < kp->img_start || va >= kp->img_end) {
+        printf("error: 0x%016" PRIx64 " is outside the kernel image\n", va);
+        goto out;
+    }
+    s = ksym_by_addr(&kp->ksym, va, &off);
+    if (!s) printf("error: 0x%016" PRIx64 " is below every symbol\n", va);
+    else printf("0x%016" PRIx64 " = %s+0x%" PRIx64 " (%c)\n", va, s->name, off, s->type);
+
+out:
+    return;
+}
+
 static void cmd_field(prof_state_t *ps, const char *args) {
-    char type[128], path[256];
+    char type[128], path[256], base[256];
     uint64_t va = 0;
-    int n = sscanf(args, "%127s %255s %" SCNx64, type, path, &va);
+    int n = sscanf(args, "%127s %255s %255s", type, path, base);
     if (n < 2) {
-        printf("usage: field <type> <path> [vaddr hex]\n");
+        printf("usage: field <type> <path> [vaddr hex | symbol]\n");
         return;
     }
     if (!ps->ready) {
@@ -513,6 +572,10 @@ static void cmd_field(prof_state_t *ps, const char *args) {
     if (f.ref && btf_type(&kp->btf, f.ref, &r) == 0) printf(", -> %s %s", btf_kind_name(r.kind), r.name);
     putchar('\n');
     if (n < 3) return;
+    if (parse_kaddr(kp, base, &va) != 0) {
+        printf("error: no symbol %s, and it isn't a hex address\n", base);
+        return;
+    }
 
     kval_t v;
     if (kfield_read(kp, &f, va, &v, err, sizeof(err)) != 0) {
@@ -548,6 +611,7 @@ static bool dispatch(vmi_session_t *session, hook_manager_t *mgr, prof_state_t *
     /* kernel profile commands */
     else if (strcmp(cmd, "prof") == 0) cmd_prof(session, ps);
     else if (strcmp(cmd, "tasks") == 0) cmd_tasks(ps);
+    else if (strcmp(cmd, "sym") == 0) cmd_sym(ps, args);
     else if (strcmp(cmd, "field") == 0) cmd_field(ps, args);
     /* hook commands */
     else if (strcmp(cmd, "watch") == 0) cmd_watch(mgr, args);

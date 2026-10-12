@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "vmi/vmi.h"
+
 #define FAIL(...)                                                                                                      \
     do {                                                                                                               \
         if (err) snprintf(err, err_len, __VA_ARGS__);                                                                  \
@@ -161,7 +163,7 @@ int kfield_read(const kprof_t *kp, const kfield_t *f, uint64_t base_va, kval_t *
         *v = (kval_t) {0};
         FAIL("out of memory for %u bytes", f->size);
     }
-    int rc = kprof_read(kp, base_va + f->offset, buf, f->size, err, err_len);
+    int rc = vmi_read_virt(kp->session, base_va + f->offset, buf, f->size, err, err_len);
     if (rc == 0) {
         /* decode against a base that starts f->offset bytes before buf */
         kfield_t at = *f;
