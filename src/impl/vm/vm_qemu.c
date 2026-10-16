@@ -5,6 +5,8 @@
 #include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdbool.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -142,6 +144,18 @@ static void build_domain_xml(const vm_config_t *cfg, const char *qmp_abs, const 
     xml_append(xml, &len, "</domain>\n");
 }
 
+static bool domain_exists(virConnectPtr conn, const char *name) {
+    virDomainPtr *doms = NULL;
+    int n = virConnectListAllDomains(conn, &doms, 0);
+    bool found = false;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(virDomainGetName(doms[i]), name) == 0) found = true;
+        virDomainFree(doms[i]);
+    }
+    free(doms);
+    return found;
+}
+
 static int read_pidfile(const char *name, pid_t *out_pid) {
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "/run/libvirt/qemu/%s.pid", name);
@@ -184,6 +198,9 @@ int qemu_spawn(const vm_config_t *cfg, const char *qmp_socket, const char *monit
         write_log(log_path, "failed to connect to qemu:///system\n");
         return -1;
     }
+
+    /* a just-stopped instance lingers in libvirt for a moment after qemu exits */
+    for (int i = 0; i < 50 && domain_exists(conn, cfg->name); i++) usleep(100000);
 
     virDomainPtr dom = virDomainCreateXML(conn, xml, 0);
     if (!dom) {

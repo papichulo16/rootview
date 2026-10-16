@@ -9,12 +9,24 @@
 static char base[PATH_MAX] = ".rootview";
 static char root[PATH_MAX] = ".rootview/vms";
 
-void vm_store_set_base(const char *dir) {
-    snprintf(base, sizeof(base), "%s/.rootview", dir);
+/* state.json keeps socket paths built from the root, and they must resolve
+ * from any cwd, not just the one the vm was started from */
+static void absolutize(void) {
+    char cwd[PATH_MAX - 16], rel[PATH_MAX];
+    if (base[0] == '/' || !getcwd(cwd, sizeof(cwd))) return;
+    snprintf(rel, sizeof(rel), "%s", base);
+    snprintf(base, sizeof(base), "%s/%s", cwd, rel);
     snprintf(root, sizeof(root), "%s/vms", base);
 }
 
+void vm_store_set_base(const char *dir) {
+    snprintf(base, sizeof(base), "%s/.rootview", dir);
+    snprintf(root, sizeof(root), "%s/vms", base);
+    absolutize();
+}
+
 const char *vm_store_root(void) {
+    absolutize();
     struct stat st;
     if (stat(base, &st) != 0) mkdir(base, 0755);
     if (stat(root, &st) != 0) mkdir(root, 0755);
