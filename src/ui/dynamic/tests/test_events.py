@@ -75,14 +75,62 @@ def test_sse_source_emits_events_then_keepalives():
         source = sse_source(bus, keepalive=0.05)
         try:
             replayed = await anext(source)
+            marker = await anext(source)
             idle = await anext(source)
-            return replayed, idle
+            return replayed, marker, idle
         finally:
             await source.aclose()
 
-    replayed, idle = asyncio.run(scenario())
+    replayed, marker, idle = asyncio.run(scenario())
     assert replayed.startswith("event: status\n")
+    assert marker.startswith("event: ready\n")
     assert idle == ": keepalive\n\n"
+
+
+def test_ready_marker_separates_history_from_live_events():
+    """The marker must land after everything replayed and before anything new.
+
+    The introspect page reloads itself when a scan reports a different finding
+    count, and only events after this marker are allowed to trigger that. If
+    the marker arrived early, replayed history would read as live news, the
+    page would reload, reconnect, be replayed the same history, and reload
+    again without end.
+    """
+
+    async def scenario():
+        bus = EventBus()
+        bus.publish(Event.status("before one"))
+        bus.publish(Event.status("before two"))
+
+        source = sse_source(bus, keepalive=5)
+        try:
+            first = await anext(source)
+            second = await anext(source)
+            marker = await anext(source)
+            bus.publish(Event.status("after"))
+            live = await anext(source)
+            return first, second, marker, live
+        finally:
+            await source.aclose()
+
+    first, second, marker, live = asyncio.run(scenario())
+    assert "before one" in first
+    assert "before two" in second
+    assert marker.startswith("event: ready\n")
+    assert "after" in live
+
+
+def test_ready_marker_is_sent_even_with_no_history():
+    """A page connecting to an idle server still needs to know it is live."""
+
+    async def scenario():
+        source = sse_source(EventBus(), keepalive=5)
+        try:
+            return await anext(source)
+        finally:
+            await source.aclose()
+
+    assert asyncio.run(scenario()).startswith("event: ready\n")
 
 
 def test_sse_source_unsubscribes_when_closed():

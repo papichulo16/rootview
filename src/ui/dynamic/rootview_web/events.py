@@ -59,6 +59,17 @@ class Event(dict):
         )
 
     @classmethod
+    def ready(cls) -> "Event":
+        """Marks the end of the replayed history for one subscriber.
+
+        Everything before it on a connection already happened; everything after
+        it is happening now. A page that reacts to change -- rather than just
+        rendering what it is sent -- needs that boundary, otherwise replayed
+        history reads as a burst of live news every time it connects.
+        """
+        return cls(type="ready", data={})
+
+    @classmethod
     def status(cls, message: str, **extra: Any) -> "Event":
         return cls(type="status", data={"message": message, **extra})
 
@@ -153,6 +164,14 @@ async def sse_source(
     down cleanly.
     """
     async with bus.subscribe(replay=replay) as queue:
+        # Whatever is in the queue at this instant is the replayed history:
+        # subscribe() filled it synchronously and nothing has awaited since, so
+        # no live event can have slipped in. Draining exactly that many events
+        # puts the marker at the true boundary.
+        for _ in range(queue.qsize()):
+            yield format_sse(queue.get_nowait())
+        yield format_sse(Event.ready())
+
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=keepalive)
