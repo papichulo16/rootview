@@ -10,8 +10,10 @@ facts. None of them decides what is malicious.
   ftrace     dyn_ftrace records and their call sites
   pagehash   per-page hashes of kernel memory, and comparing them
   memwatch   write-watch a memory range and decode the writes
+  bpf        loaded eBPF programs and maps
 """
 
+from rootview.rvtools.bpf import Bpf
 from rootview.rvtools.common import Layout, Symbols, attach, is_kernel_va
 from rootview.rvtools.ftrace import Ftrace
 from rootview.rvtools.memwatch import MemWatch
@@ -19,4 +21,4 @@ from rootview.rvtools.modules import Modules
 from rootview.rvtools.tables import Tables
 from rootview.rvtools.tasks import Tasks
 
-__all__ = ["Ftrace", "Layout", "MemWatch", "Modules", "Symbols", "Tables", "Tasks", "attach", "is_kernel_va"]
+__all__ = ["Bpf", "Ftrace", "Layout", "MemWatch", "Modules", "Symbols", "Tables", "Tasks", "attach", "is_kernel_va"]
