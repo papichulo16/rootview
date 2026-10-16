@@ -1,4 +1,12 @@
 rv
 build/obj/
+build/pic/
+.rootview/
 
 .gdb_history
+*.so
+*.so.*
+
+__pycache__/
+*.egg-info/
+tests/
