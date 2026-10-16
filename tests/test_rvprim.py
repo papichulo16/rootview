@@ -182,3 +182,45 @@ def test_mod_tree_matches_module_list(guest):
         for rb in guest.rbtree(root):
             in_tree.add(int.from_bytes(guest.read(rb - node + mod, 8), "little"))
     assert listed and listed == in_tree
+
+
+# ---- the raw guest and hooks, as the kvmi shell has them ----
+
+
+def test_read_virt_matches_read(guest):
+    va = guest.sym("init_task")
+    with guest.snapshot():
+        assert guest.read_virt(va, 64) == guest.read(va, 64)
+
+
+def test_regs_match_reg(guest):
+    guest.pause()
+    try:
+        regs = guest.regs()
+        assert regs["cr3"] == guest.reg("cr3")
+        assert regs["idtr_base"] == guest.reg("idtr_base")
+    finally:
+        guest.resume()
+
+
+def test_set_reg_refuses_control_registers(guest):
+    with pytest.raises(RootviewError):
+        guest.set_reg("cr3", 0)
+
+
+def test_hooks_are_listed_until_removed(guest):
+    guest.hook_desc("rvtest-idtr", "idtr")
+    try:
+        hooks = {h.name: h for h in guest.hooks()}
+        assert hooks["rvtest-idtr"].kind == "descriptor"
+        assert hooks["rvtest-idtr"].descriptor == "idtr"
+    finally:
+        guest.hook_remove("rvtest-idtr")
+    assert "rvtest-idtr" not in {h.name for h in guest.hooks()}
+
+
+def test_btf_type_names_a_field(guest):
+    f = guest.field("task_struct", "se")
+    t = guest.btf_type(f.type)
+    assert (t.kind, t.name) == ("struct", "sched_entity")
+    assert guest.info().btf_types > f.type

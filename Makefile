@@ -13,14 +13,14 @@ CFLAGS := -Wall -Wextra -O2 -I$(INTF_DIR) -g $(shell pkg-config --cflags libvmi)
 # the same way for the name to resolve).
 LDFLAGS := $(shell pkg-config --libs libvmi) -lvirt -Wl,-rpath,'$$ORIGIN'
 
-SRCS := $(shell find $(IMPL_DIR) -name '*.c')
+SRCS := $(shell find $(IMPL_DIR) -path $(IMPL_DIR)/bind -prune -o -name '*.c' -print)
 OBJS := $(patsubst $(IMPL_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 
 all: $(TARGET)
 
-# librootview.so for the python bindings; see bind/Makefile
+# librootview.so for the python bindings; see src/impl/bind/Makefile
 lib:
-	$(MAKE) -C bind
+	$(MAKE) -C $(IMPL_DIR)/bind
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(OBJS) $(LDFLAGS) -o $@
@@ -32,7 +32,7 @@ $(BUILD_DIR)/%.o: $(IMPL_DIR)/%.c
 # leaves the libvmi.so* copied next to rv alone
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET)
-	$(MAKE) -C bind clean
+	$(MAKE) -C $(IMPL_DIR)/bind clean
 
 
 .PHONY: all clean lib

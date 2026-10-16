@@ -2,34 +2,7 @@
 
   rootview.rvprim    the VMI primitives over librootview.so
   rootview.rvtools   tooling on top of them for a detection engine
-
-The primitives are re-exported here: ``from rootview import Guest``.
 """
 
-from rootview.rvprim import (
-    Field,
-    Guest,
-    GuestVm,
-    HookEvent,
-    KernelInfo,
-    RootviewError,
-    Symbol,
-    Task,
-    Value,
-    list_vms,
-    set_base,
-)
-
-__all__ = [
-    "Field",
-    "Guest",
-    "GuestVm",
-    "HookEvent",
-    "KernelInfo",
-    "RootviewError",
-    "Symbol",
-    "Task",
-    "Value",
-    "list_vms",
-    "set_base",
-]
+from rootview.rvprim import *  # noqa: F403
+from rootview.rvprim import __all__  # noqa: F401

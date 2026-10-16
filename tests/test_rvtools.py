@@ -105,7 +105,7 @@ def test_pagehash_is_stable(guest):
 
 
 def _event(name, gpa, before, after, rip=0xFFFFFFFF81000000):
-    return HookEvent(0, "mem", name, 0, 0, 0, 0, 0, 0, 0, False, gpa, 2, rip, "", 0, True, True,
+    return HookEvent(0, "mem", name, 0, 0, 0, 0, 0, 0, "", False, gpa, "w", rip, "", 0, True, True,
                      gpa & ~15, bytes(before), bytes(after))
 
 
