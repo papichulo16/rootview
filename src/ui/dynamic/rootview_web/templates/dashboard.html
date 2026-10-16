@@ -67,7 +67,7 @@
           <span data-role="progs">-</span> programs /
           <span data-role="maps">-</span> maps
         </span>
-        <a href="/introspect?vm={{ vm.vm_id }}">Inspect &rarr;</a>
+        <span><a href="/guests/{{ vm.vm_id }}">Guest</a> · <a href="/introspect?vm={{ vm.vm_id }}">eBPF &rarr;</a></span>
       </footer>
     </article>
     {% else %}

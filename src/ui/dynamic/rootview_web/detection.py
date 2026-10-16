@@ -10,6 +10,8 @@ Each rule is a small function so the test plan can exercise them one at a time.
 
 from __future__ import annotations
 
+import re
+
 from rootview_web.schemas import (
     BpfProgram,
     BpfSnapshot,
@@ -51,6 +53,12 @@ CONCEALMENT_TARGETS = {
     "tcp4_seq_show": "the /proc network tables (hiding connections)",
     "tcp6_seq_show": "the /proc network tables (hiding connections)",
 }
+
+
+def _syscall(target: str) -> str:
+    """syscalls:sys_enter_getdents64 and kprobe __x64_sys_getdents64 both name sys_getdents64."""
+    name = re.sub(r"^__(x64|ia32|arm64)_", "", target.split(":")[-1])
+    return re.sub(r"^sys_(enter|exit)_", "sys_", name)
 
 
 def _detection_id(vm_id: str, rule: DetectionRule, subject: int | str) -> str:
@@ -171,7 +179,7 @@ def _check_concealment_hooks(prog: BpfProgram, vm_id: str) -> list[Detection]:
     """Flag attachment to syscalls used for hiding things from the operator."""
     out = []
     for attach in prog.attach_points:
-        target = attach.target.split(":")[-1]
+        target = _syscall(attach.target)
         what = CONCEALMENT_TARGETS.get(target)
         if what is None:
             continue

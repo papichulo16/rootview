@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}RootView - {{ vm_id }}{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', path='/css/guest.css') }}">{% endblock %}
+
+{% block content %}
+{% if not connected %}
+<section class="panel"><p class="empty">No introspection engine is running. Start the server with <code>ROOTVIEW_BACKEND=libvmi</code> on the KVMI host.</p></section>
+{% elif vm is none %}
+<section class="panel"><p class="error">{{ error or 'No guest named ' ~ vm_id }}</p><p><a href="/guests">&larr; All guests</a></p></section>
+{% else %}
+
+<section class="guest-head">
+  <div>
+    <a href="/guests" class="muted">&larr; Guests</a>
+    <h1><code>{{ vm.name }}</code> <span class="pill state-{{ 'running' if vm.running else 'shut_off' }}">{{ 'running' if vm.running else 'stopped' }}</span></h1>
+  </div>
+  <div class="actions">
+    {% if vm.running %}
+      <button class="btn ghost" data-action="pause">Pause</button>
+      <button class="btn ghost" data-action="resume">Resume</button>
+      <button class="btn ghost" data-action="profile">Reload profile</button>
+      <button class="btn ghost" data-action="stop" data-vm="{{ vm.name }}">Stop</button>
+      <button class="btn ghost" data-action="restart" data-vm="{{ vm.name }}">Restart</button>
+    {% else %}
+      <button class="btn ghost" data-action="start" data-vm="{{ vm.name }}">Start</button>
+    {% endif %}
+  </div>
+</section>
+
+<p class="notice" id="notice" hidden></p>
+
+<section class="panel">
+  <h2>Overview</h2>
+  <div class="overview">
+    <dl class="kv">
+      <div><dt>Memory</dt><dd>{{ vm.config.memory_mb }} MB</dd></div>
+      <div><dt>CPUs</dt><dd>{{ vm.config.cpus }}</dd></div>
+      <div><dt>PID</dt><dd>{{ vm.pid or '-' }}</dd></div>
+      <div><dt>Started</dt><dd data-epoch="{{ vm.started_at or '' }}">-</dd></div>
+      <div><dt>Disk</dt><dd>{{ vm.config.disk_image or '-' }}</dd></div>
+      <div><dt>CD-ROM</dt><dd>{{ vm.config.cdrom or '-' }}</dd></div>
+      <div><dt>Network</dt><dd>{{ vm.config.network }}</dd></div>
+      <div><dt>KVMI socket</dt><dd>{{ vm.kvmi_socket or '-' }}</dd></div>
+      <div><dt>Log</dt><dd>{{ vm.log_path }}</dd></div>
+    </dl>
+    <dl class="kv" id="kernel"><div><dt>Kernel</dt><dd class="muted">{{ 'loading…' if vm.running and vm.kvmi else 'guest is not running with KVMI' }}</dd></div></dl>
+  </div>
+</section>
+
+{% if vm.running and vm.kvmi %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>Processes <span class="muted" id="task-count"></span></h2>
+    <div class="inline">
+      <input id="task-filter" placeholder="filter by name or pid">
+      <button class="btn" data-load="tasks">Refresh</button>
+    </div>
+  </div>
+  <div class="table-scroll scroll-y">
+    <table class="data"><thead><tr><th>PID</th><th>TGID</th><th>Name</th><th>task_struct</th></tr></thead><tbody id="tasks"></tbody></table>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Registers <span class="muted">vcpu 0</span></h2>
+    <button class="btn" data-load="registers">Refresh</button>
+  </div>
+  <div class="reg-grid" id="registers"></div>
+  {% if settings.allow_writes %}
+  <form class="inline-form" id="reg-form">
+    <select name="name">{% for r in ['rax','rbx','rcx','rdx','rsi','rdi','rbp','rsp','r8','r9','r10','r11','r12','r13','r14','r15','rip','rflags'] %}<option>{{ r }}</option>{% endfor %}</select>
+    <input name="value" placeholder="0x0" required>
+    <button class="btn" type="submit">Set register</button>
+    <span class="muted">pause first; lands on resume</span>
+  </form>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Memory</h2>
+  <form class="inline-form" id="mem-form">
+    <select name="space"><option value="kernel">kernel</option><option value="virt">virtual (CR3)</option><option value="phys">physical</option></select>
+    <input name="addr" placeholder="0xffffffff81000000 or symbol" required>
+    <input name="length" type="number" min="1" max="65536" value="256">
+    <button class="btn" type="submit">Read</button>
+    <button class="btn ghost" type="button" id="translate">Translate</button>
+  </form>
+  <p class="muted" id="mem-info"></p>
+  <pre class="hexdump" id="hexdump"></pre>
+  {% if settings.allow_writes %}
+  <form class="inline-form" id="write-form">
+    <select name="space"><option value="virt">virtual (CR3)</option><option value="phys">physical</option></select>
+    <input name="addr" placeholder="address" required>
+    <input name="data" placeholder="hex bytes, e.g. 9090" required pattern="([0-9a-fA-F]{2})+">
+    <button class="btn danger" type="submit">Write</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Symbols &amp; BTF</h2>
+  <div class="lookup-grid">
+    <form class="inline-form" id="sym-form">
+      <input name="name" placeholder="symbol, e.g. init_task" required>
+      <button class="btn" type="submit">Find symbol</button>
+    </form>
+    <form class="inline-form" id="addr-form">
+      <input name="addr" placeholder="address in the kernel image" required>
+      <button class="btn" type="submit">Name address</button>
+    </form>
+    <form class="inline-form" id="field-form">
+      <input name="type" placeholder="task_struct" required>
+      <input name="path" placeholder="se.vruntime" required>
+      <input name="addr" placeholder="struct address or symbol (optional)">
+      <button class="btn" type="submit">Resolve field</button>
+    </form>
+  </div>
+  <dl class="kv" id="lookup"></dl>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Hooks</h2>
+    <button class="btn" data-load="hooks">Refresh</button>
+  </div>
+  <form class="inline-form" id="hook-form">
+    <input name="name" placeholder="name" required maxlength="63">
+    <select name="kind">
+      <option value="register">register write</option>
+      <option value="breakpoint">breakpoint</option>
+      <option value="cpuid">cpuid</option>
+      <option value="descriptor">descriptor table</option>
+      <option value="mem">memory access</option>
+    </select>
+    <select name="reg" data-kinds="register"><option>cr0</option><option>cr3</option><option>cr4</option><option>msr_all</option></select>
+    <input name="addr" placeholder="address" data-kinds="breakpoint mem">
+    <input name="leaf" placeholder="leaf (hex) or any" value="any" data-kinds="cpuid">
+    <select name="table" data-kinds="descriptor"><option>idtr</option><option>gdtr</option><option>ldtr</option><option>tr</option></select>
+    <input name="access" placeholder="rwx" value="w" data-kinds="mem">
+    <button class="btn" type="submit">Add hook</button>
+  </form>
+  <div class="table-scroll">
+    <table class="data"><thead><tr><th>Name</th><th>Kind</th><th>Target</th><th></th></tr></thead><tbody id="hooks"></tbody></table>
+  </div>
+
+  <div class="panel-head events-head">
+    <h2>Events <span class="muted" id="event-info"></span></h2>
+    <div class="inline">
+      <label class="check"><input type="checkbox" id="auto-poll"> live</label>
+      <button class="btn" id="poll">Poll</button>
+      <button class="btn ghost" id="clear-events">Clear</button>
+    </div>
+  </div>
+  <div class="table-scroll scroll-y">
+    <table class="data"><thead><tr><th>#</th><th>Hook</th><th>Kind</th><th>vCPU</th><th>Detail</th></tr></thead><tbody id="events"></tbody></table>
+  </div>
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', path='/js/guest.js') }}"></script>
+<script>RootViewGuest.initGuest({{ vm_id | tojson }}, {{ (vm is not none and vm.running and vm.kvmi) | tojson }});</script>
+{% endblock %}

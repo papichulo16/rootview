@@ -297,7 +297,6 @@ def test_diagrams_reveal_without_javascript(unconfigured_client):
 
 
 def test_libvmi_backend_can_be_selected():
-    """Selecting the unwritten backend must not stop the server from starting."""
     assert isinstance(build_backend(Settings(backend="libvmi")), LibVMIBackend)
 
 
@@ -306,18 +305,25 @@ def test_unknown_backend_name_is_rejected():
         build_backend(Settings(backend="nonsense"))
 
 
+class UnfinishedBackend(FakeBackend):
+    async def list_vms(self):
+        raise NotImplementedError("list_vms is not implemented yet")
+
+    async def scan(self, vm_id):
+        raise NotImplementedError("scan is not implemented yet")
+
+
 def test_pages_still_render_with_an_unimplemented_backend():
-    """Someone filling in the backend should be able to see the interface while
+    """Someone writing a backend should be able to see the interface while
     none of its methods work yet."""
-    with client_with(LibVMIBackend()) as c:
+    with client_with(UnfinishedBackend()) as c:
         for path in ("/", "/dashboard", "/introspect"):
             assert c.get(path).status_code == 200, path
-        assert "No introspection backend connected" in c.get("/dashboard").text
 
 
 def test_api_reports_unimplemented_as_501():
     """501 says the backend is unwritten; 500 would blame the web server."""
-    with client_with(LibVMIBackend()) as c:
+    with client_with(UnfinishedBackend()) as c:
         assert c.get("/api/vms").status_code == 501
         assert c.post("/api/vms/x/scan").status_code == 501
 
