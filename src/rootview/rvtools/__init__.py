@@ -11,9 +11,11 @@ facts. None of them decides what is malicious.
   pagehash   per-page hashes of kernel memory, and comparing them
   memwatch   write-watch a memory range and decode the writes
   clock      the guest's boot time, and boot-relative stamps as dates
+  bpf        loaded eBPF programs and maps
   ebpf       loaded eBPF programs, maps and attachments: decoded and analyzed
 """
 
+from rootview.rvtools.bpf import Bpf
 from rootview.rvtools.clock import Clock
 from rootview.rvtools.common import Layout, Symbols, attach, is_kernel_va
 from rootview.rvtools.ftrace import Ftrace
@@ -22,4 +24,16 @@ from rootview.rvtools.modules import Modules
 from rootview.rvtools.tables import Tables
 from rootview.rvtools.tasks import Tasks
 
-__all__ = ["Clock", "Ftrace", "Layout", "MemWatch", "Modules", "Symbols", "Tables", "Tasks", "attach", "is_kernel_va"]
+__all__ = [
+    "Bpf",
+    "Clock",
+    "Ftrace",
+    "Layout",
+    "MemWatch",
+    "Modules",
+    "Symbols",
+    "Tables",
+    "Tasks",
+    "attach",
+    "is_kernel_va",
+]

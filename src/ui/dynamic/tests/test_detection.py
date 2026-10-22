@@ -151,3 +151,12 @@ def test_findings_are_sorted_most_severe_first():
     severities = [d.severity for d in run_rules(snap)]
     assert severities[0] is Severity.CRITICAL
     assert severities == sorted(severities, key=lambda s: ["critical", "high", "medium", "low", "info"].index(s.value))
+
+
+def test_syscall_targets_are_normalized():
+    from rootview_web.detection import _syscall
+
+    for target in ("syscalls:sys_enter_getdents64", "syscalls:sys_exit_getdents64",
+                   "kprobe:__x64_sys_getdents64", "sys_getdents64"):
+        assert _syscall(target) == "sys_getdents64"
+    assert _syscall("sched:sched_process_exec") == "sched_process_exec"

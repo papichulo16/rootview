@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}RootView - Guests{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', path='/css/guest.css') }}">{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>Guests</h2>
+    {% if connected %}<button class="btn" type="button" data-toggle="create-form">New guest</button>{% endif %}
+  </div>
+
+  <p class="notice" id="notice" hidden></p>
+
+  {% if not connected %}
+  <p class="empty">No introspection engine is running, so there are no guests to manage. Start the server with <code>ROOTVIEW_BACKEND=libvmi</code> on the KVMI host.</p>
+  {% elif error %}
+  <p class="error">Could not list guests: {{ error }}</p>
+  {% else %}
+
+  <form class="create-form" id="create-form" hidden>
+    <label>Name <input name="name" required maxlength="63" pattern="[A-Za-z0-9_.-]+"></label>
+    <label>Memory (MB) <input name="memory_mb" type="number" min="128" value="2048"></label>
+    <label>CPUs <input name="cpus" type="number" min="1" value="2"></label>
+    <label class="wide">Disk image (qcow2) <input name="disk_image" placeholder="/home/vmiuser/rvtest/disk.qcow2"></label>
+    <label class="wide">CD-ROM <input name="cdrom" placeholder="/path/to/image.iso"></label>
+    <label>Network
+      <select name="network"><option>user</option><option>none</option><option>tap</option></select>
+    </label>
+    <label>Display
+      <select name="display"><option>none</option><option>vnc</option><option>gtk</option></select>
+    </label>
+    <label class="check"><input name="kvmi_enabled" type="checkbox" checked> KVMI</label>
+    <label class="wide">Extra QEMU args <input name="extra_args"></label>
+    <div class="form-actions"><button class="btn" type="submit">Create</button></div>
+  </form>
+
+  <div class="table-scroll">
+    <table class="data">
+      <thead>
+        <tr><th>Name</th><th>Status</th><th>PID</th><th>Memory</th><th>CPUs</th><th>KVMI</th><th>Profile</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for vm in vms %}
+        <tr>
+          <td><a href="/guests/{{ vm.name }}"><code>{{ vm.name }}</code></a></td>
+          <td><span class="pill state-{{ 'running' if vm.running else 'shut_off' }}">{{ 'running' if vm.running else 'stopped' }}</span></td>
+          <td class="num">{{ vm.pid or '-' }}</td>
+          <td class="num">{{ vm.config.memory_mb }} MB</td>
+          <td class="num">{{ vm.config.cpus }}</td>
+          <td>{{ 'yes' if vm.kvmi else ('enabled' if vm.config.kvmi_enabled else 'off') }}</td>
+          <td>
+            {% if vm.profile_loaded %}loaded
+            {% elif vm.profile_error %}<span class="warn" title="{{ vm.profile_error }}">failed</span>
+            {% else %}<span class="muted">not attached</span>{% endif %}
+          </td>
+          <td class="actions">
+            {% if vm.running %}
+              <button class="btn ghost" data-action="stop" data-vm="{{ vm.name }}">Stop</button>
+              <button class="btn ghost" data-action="restart" data-vm="{{ vm.name }}">Restart</button>
+            {% else %}
+              <button class="btn ghost" data-action="start" data-vm="{{ vm.name }}">Start</button>
+            {% endif %}
+            <button class="btn ghost danger" data-action="destroy" data-vm="{{ vm.name }}">Destroy</button>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="empty">No guests yet. Create one with <em>New guest</em>, or <code>./rv vm create</code> from the repository root.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', path='/js/guest.js') }}"></script>
+<script>RootViewGuest.initList();</script>
+{% endblock %}

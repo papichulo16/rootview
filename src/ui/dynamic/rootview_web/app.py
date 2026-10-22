@@ -9,19 +9,20 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from rootview_web.backends.base import IntrospectionBackend, UnknownVMError
+from rootview_web.backends.base import BackendError, IntrospectionBackend, UnknownVMError
 from rootview_web.backends.libvmi import LibVMIBackend
 from rootview_web.backends.unconfigured import UnconfiguredBackend
 from rootview_web.config import Settings
+from rootview_web.engine import GuestPool
 from rootview_web.events import EventBus
-from rootview_web.routers import api, pages
+from rootview_web.routers import api, engine as engine_routes, guest, guest_pages, hooks, pages, vms
 from rootview_web.services import ScannerService
 from rootview_web.templating import STATIC_DIR
 
 log = logging.getLogger(__name__)
 
 
-def build_backend(settings: Settings) -> IntrospectionBackend:
+def build_backend(settings: Settings, engine: GuestPool | None = None) -> IntrospectionBackend:
     """Choose the introspection backend.
 
     The single place that knows about concrete backends. When the LibVMI engine
@@ -31,7 +32,7 @@ def build_backend(settings: Settings) -> IntrospectionBackend:
     if settings.backend == "none":
         return UnconfiguredBackend()
     if settings.backend == "libvmi":
-        return LibVMIBackend()
+        return LibVMIBackend(engine or GuestPool(settings.store))
     raise ValueError(
         f"unknown backend {settings.backend!r}; expected 'none' or 'libvmi'"
     )
@@ -60,20 +61,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    backend = build_backend(settings)
+    engine = GuestPool(settings.store) if settings.backend == "libvmi" else None
+    backend = build_backend(settings, engine)
     bus = EventBus()
     app.state.settings = settings
     app.state.backend = backend
+    app.state.engine = engine
     app.state.bus = bus
     app.state.scanner = ScannerService(backend, bus, interval=settings.scan_interval)
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.include_router(api.router)
+    app.include_router(vms.router)
+    app.include_router(guest.router)
+    app.include_router(hooks.router)
+    app.include_router(engine_routes.router)
     app.include_router(pages.router)
+    app.include_router(guest_pages.router)
 
     @app.exception_handler(UnknownVMError)
     async def _unknown_vm(request: Request, exc: UnknownVMError) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(BackendError)
+    async def _backend_error(request: Request, exc: BackendError) -> JSONResponse:
+        return JSONResponse(status_code=502, content={"detail": str(exc)})
 
     @app.exception_handler(NotImplementedError)
     async def _not_implemented(request: Request, exc: NotImplementedError) -> JSONResponse:

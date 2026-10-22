@@ -50,9 +50,9 @@ fi
 
 # Reinstall when the venv is new or a dependency has changed, so picking up a
 # new requirement never depends on anyone remembering to.
-if [[ ! -f "$STAMP" || pyproject.toml -nt "$STAMP" ]]; then
+if [[ ! -f "$STAMP" || pyproject.toml -nt "$STAMP" || ../../../pyproject.toml -nt "$STAMP" ]]; then
   note "installing dependencies (this takes a moment the first time)"
-  "$VENV/bin/pip" install --quiet --disable-pip-version-check --editable ".[dev]"
+  "$VENV/bin/pip" install --quiet --disable-pip-version-check --editable ".[dev]" --editable ../../..
   touch "$STAMP"
 fi
 

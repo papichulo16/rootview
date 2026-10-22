@@ -11,5 +11,4 @@
 | `bind/` | `librootview.so` and its `rv_*` API (`rootview.h`) |
 | `src/rootview/` | the Python package: `rvprim.py`, `rvtools/` |
 | `src/ui/dynamic/` | the web server |
-| `tests/` | live Python tests |
 | `examples/` | scripts using rvtools |

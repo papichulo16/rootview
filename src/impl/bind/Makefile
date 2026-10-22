@@ -1,30 +1,26 @@
-# librootview.so: the engine plus bind/rootview.c's flat api, for the python
-# package (src/rootview/rvprim.py). built from the same
-# ../src/impl sources as rv, minus the command-line front ends (main.c, the
-# *_cli.c files and kvmi_shell.c), into a separate -fPIC object tree.
-# lands next to rv so the same $ORIGIN rpath finds the libvmi.so copied there.
-# only the rv_* functions are exported.
+# librootview.so: the engine and the rv_* api, without the command-line front ends
 
-ROOT := ..
+ROOT := ../../..
 IMPL_DIR := $(ROOT)/src/impl
 INTF_DIR := $(ROOT)/src/intf
+BIND_DIR := $(IMPL_DIR)/bind
 BUILD_DIR := $(ROOT)/build/pic
 TARGET := $(ROOT)/librootview.so
 
 CC := gcc
-CFLAGS := -Wall -Wextra -O2 -g -fPIC -fvisibility=hidden -I$(INTF_DIR) -I. $(shell pkg-config --cflags libvmi)
+CFLAGS := -Wall -Wextra -O2 -g -fPIC -fvisibility=hidden -I$(INTF_DIR) $(shell pkg-config --cflags libvmi)
 LDFLAGS := -shared $(shell pkg-config --libs libvmi) -lvirt -Wl,-rpath,'$$ORIGIN' -Wl,--no-undefined
 
 FRONT_ENDS := $(IMPL_DIR)/main.c $(IMPL_DIR)/kvmi/kvmi_shell.c $(wildcard $(IMPL_DIR)/*/*_cli.c)
 SRCS := $(filter-out $(FRONT_ENDS),$(shell find $(IMPL_DIR) -name '*.c'))
-OBJS := $(patsubst $(IMPL_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS)) $(BUILD_DIR)/bind/rootview.o
+OBJS := $(patsubst $(IMPL_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) $(OBJS) $(LDFLAGS) -o $@
 
-$(BUILD_DIR)/bind/rootview.o: rootview.c rootview.h
+$(BUILD_DIR)/bind/%.o: $(BIND_DIR)/%.c $(BIND_DIR)/rv_priv.h $(wildcard $(INTF_DIR)/bind/*.h)
 	mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 

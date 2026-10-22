@@ -55,7 +55,7 @@
             {% for a in p.attach_points %}
               <code>{{ a.target }}</code>{{ ', ' if not loop.last }}
             {% else %}
-              <span class="muted">not attached</span>
+              <span class="muted" title="no tracepoint, kprobe or fentry attachment found; cgroup, XDP and other attachments are not read yet">none found</span>
             {% endfor %}
           </td>
           <td>

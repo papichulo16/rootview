@@ -10,6 +10,13 @@ import os
 from dataclasses import dataclass
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name)
     if raw is None:
@@ -36,6 +43,12 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8000
 
+    #: Directory holding .rootview/vms. None keeps librootview's default, the repo root.
+    store: str | None = None
+
+    #: Whether the API may write guest memory and registers.
+    allow_writes: bool = False
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -43,4 +56,6 @@ class Settings:
             scan_interval=_env_float("ROOTVIEW_SCAN_INTERVAL", cls.scan_interval),
             host=os.environ.get("ROOTVIEW_HOST", cls.host),
             port=int(os.environ.get("ROOTVIEW_PORT", cls.port)),
+            store=os.environ.get("ROOTVIEW_STORE") or None,
+            allow_writes=_env_bool("ROOTVIEW_ALLOW_WRITES", cls.allow_writes),
         )

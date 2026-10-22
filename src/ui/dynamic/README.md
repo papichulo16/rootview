@@ -73,5 +73,4 @@ All environment variables, all optional:
 | `ROOTVIEW_SCAN_INTERVAL` | `5.0` | Seconds between detection passes |
 | `ROOTVIEW_HOST` / `ROOTVIEW_PORT` | `127.0.0.1` / `8000` | Bind address |
 | `ROOTVIEW_LIB` | `<repo>/librootview.so` | The engine library the `rootview` package loads; build it with `make lib` |
-| `ROOTVIEW_TEST_VM` | first running kvmi vm | Guest for the `rootview` package's live tests (`<repo>/tests/`), which skip without one |
 

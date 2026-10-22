@@ -5,9 +5,6 @@ description = "Introspection of running KVM guests through KVMI: VMI primitives 
 requires-python = ">=3.10"
 dependencies = []
 
-[project.optional-dependencies]
-dev = ["pytest>=8.0"]
-
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
@@ -15,6 +12,3 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["rootview", "rootview.*"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]

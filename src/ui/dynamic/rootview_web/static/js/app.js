@@ -187,18 +187,43 @@ const RootView = (() => {
     // than patching rows live, the page reloads when a scan of the guest being
     // viewed reports something new, so what is on screen is always one
     // coherent snapshot rather than a mix of two.
+    //
+    // Only changes that happen while the page is open may reload it. Every
+    // connection is replayed the recent history first, and that history
+    // contains the same count changes that were already acted on -- reloading
+    // for those would reconnect, replay them again, and reload again, which is
+    // a loop the user cannot click their way out of. The `ready` marker is the
+    // server telling us the backlog is done and the rest is live.
     let lastCount = null;
-    connect({
+    let live = false;
+
+    const source = connect({
+      ready() {
+        live = true;
+      },
+
       scan(s) {
         if (vmId !== null && s.vm_id !== vmId) return;
+        if (!live) {
+          // History: adopt it as the baseline, do not react to it.
+          lastCount = s.detection_count;
+          return;
+        }
         if (lastCount !== null && s.detection_count !== lastCount) {
           window.location.reload();
         }
         lastCount = s.detection_count;
       },
+
       status(s) {
         console.warn("rootview status:", s.message);
       },
+    });
+
+    // A dropped connection is replayed from the start when EventSource retries,
+    // so the backlog has to stop counting as live again until the next marker.
+    source.addEventListener("error", () => {
+      live = false;
     });
   }
 
