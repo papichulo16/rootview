@@ -14,5 +14,6 @@ with Guest("myvm") as g:
 
 - [rvprim](rvprim.md): the VMI primitives.
 - [rvtools](rvtools.md): tooling on top of them.
+- [ebpf](ebpf.md): rvtools' eBPF programs, maps and attachments.
 
 Every failure raises `rootview.RootviewError`. Calls are thread-safe (one lock).

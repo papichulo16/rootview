@@ -11,6 +11,7 @@ They report facts and make no verdicts.
 | `ftrace.py` | ftrace records that are enabled or patched |
 | `pagehash.py` | `save` per-page hashes of text/rodata, `compare` them later |
 | `memwatch.py` | live writes to `sys_call_table` and the IDT |
+| `ebpf.py` | every loaded eBPF program, its helpers, maps and attachments, then every map (`--dump` for the instructions) |
 
 ```sh
 make lib && pip install -e .    # librootview.so and the rootview package

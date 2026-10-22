@@ -371,6 +371,23 @@ API int rv_enum_value(rv_handle_t *h, const char *enum_type, const char *name, i
     return -1;
 }
 
+API int rv_enum_name(rv_handle_t *h, const char *enum_type, int64_t value, char *out, size_t out_len, char *err,
+                     size_t err_len) {
+    const btf_t *b = &h->kp.btf;
+    char spelled[256];
+    snprintf(spelled, sizeof(spelled), "enum %s", strncmp(enum_type, "enum ", 5) == 0 ? enum_type + 5 : enum_type);
+    uint32_t id = find_type(b, spelled);
+    if (!id) id = find_type(b, enum_type);
+    const char *name = id ? btf_enum_name(b, id, (uint64_t) value) : NULL;
+    if (!name) {
+        if (!id && err) snprintf(err, err_len, "no enum %s in BTF", enum_type);
+        else if (err) snprintf(err, err_len, "%s has no enumerator with value %lld", enum_type, (long long) value);
+        return -1;
+    }
+    snprintf(out, out_len, "%s", name);
+    return 0;
+}
+
 /* ---- hooks and the event ring ---- */
 
 static void name_into(const rv_handle_t *h, uint64_t addr, char *out, size_t out_len, uint64_t *off) {

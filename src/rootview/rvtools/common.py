@@ -11,6 +11,7 @@ from rootview.rvprim import Guest, RootviewError, Symbol, list_vms
 # what list_del leaves in next/prev: ILLEGAL_POINTER_VALUE + 0x100 / + 0x122
 LIST_POISON1 = 0xDEAD000000000100
 LIST_POISON2 = 0xDEAD000000000122
+PAGE = 4096
 
 
 def attach(vm: str | None = None) -> Guest:
@@ -43,6 +44,11 @@ def printable(raw: bytes) -> str:
     """A C string out of raw bytes: cut at the NUL, non-printables as '?'."""
     raw = raw.split(b"\0", 1)[0]
     return "".join(chr(c) if 0x20 <= c < 0x7F else "?" for c in raw)
+
+
+def read_cstr(g: Guest, va: int, max: int = 128) -> str:
+    """The C string at va, read up to max bytes without crossing into the next page."""
+    return printable(g.read(va, min(max, PAGE - va % PAGE)))
 
 
 class Layout:

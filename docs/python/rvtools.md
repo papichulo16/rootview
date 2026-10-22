@@ -14,6 +14,8 @@ what is malicious.
 | `Ftrace(g)` | `records()`: dyn_ftrace records, their flags and call-site bytes |
 | `pagehash` | `hash_range`, `hash_kernel` (text + rodata), `compare(before, after)` |
 | `MemWatch(g, name, start, length, slot_size)` | write-watch a range; `poll()` returns writes decoded to slot, before, after, rip |
+| `Clock(g)` | `boot_ns()`: when the guest booted by its own clock; `from_boot(ns)`: a boot-relative stamp as a UTC datetime |
+| `ebpf` | loaded eBPF programs, maps and attachments, decoded and analyzed: see [ebpf](ebpf.md) |
 
 `sources()` returns `(addr -> set of sources, source -> error)`. Run it,
 then judge the differences in the detection layer.

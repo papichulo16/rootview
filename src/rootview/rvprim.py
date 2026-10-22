@@ -33,6 +33,7 @@ COMM_MAX = 16
 EVENTS_MAX = 4096
 SYM_MAX = 128
 KSYM_NAME_MAX = 512
+ENUM_NAME_MAX = 256
 #: rv_ksyms chunk: symbols copied per call.
 KSYMS_CHUNK = 4096
 WINDOW = 16
@@ -284,6 +285,7 @@ def _load(path: str | os.PathLike | None = None) -> ctypes.CDLL:
         "rv_ksyms": (status, (h, c.c_size_t, c.POINTER(_Ksym), c.c_size_t, size_p, *err)),
         "rv_type_size": (status, (h, c.c_char_p, u64_p, *err)),
         "rv_enum_value": (status, (h, c.c_char_p, c.c_char_p, c.POINTER(c.c_int64), *err)),
+        "rv_enum_name": (status, (h, c.c_char_p, c.c_int64, c.c_char_p, c.c_size_t, *err)),
         "rv_hook_reg": (status, (h, c.c_char_p, c.c_char_p, *err)),
         "rv_hook_bp": (status, (h, c.c_char_p, c.c_uint64, *err)),
         "rv_hook_cpuid": (status, (h, c.c_char_p, c.c_char_p, *err)),
@@ -576,6 +578,12 @@ class Guest:
         _call(self._lib.rv_enum_value, self.handle, enum.encode() if enum else None, name.encode(),
               ctypes.byref(value))
         return value.value
+
+    def enum_name(self, enum: str, value: int) -> str:
+        """The name of ``enum``'s enumerator with ``value``: enum_value() backwards."""
+        out = ctypes.create_string_buffer(ENUM_NAME_MAX)
+        _call(self._lib.rv_enum_name, self.handle, enum.encode(), value, out, ENUM_NAME_MAX)
+        return _text(out.value)
 
     # ---- hooks: events land in the C ring; poll() fills it, events() drains it ----
 
