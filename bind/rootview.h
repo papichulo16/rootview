@@ -195,6 +195,10 @@ int rv_type_size(rv_handle_t *h, const char *type, uint64_t *size, char *err, si
 int rv_enum_value(rv_handle_t *h, const char *enum_type, const char *name, int64_t *value, char *err,
                   size_t err_len);
 
+/* the inverse: the name of enum_type's enumerator with that value */
+int rv_enum_name(rv_handle_t *h, const char *enum_type, int64_t value, char *out, size_t out_len, char *err,
+                 size_t err_len);
+
 /* hooks: each pushes its events into the handle's ring, which rv_hook_poll
  * fills and rv_events drains, oldest first: up to max per call, *n how
  * many it took, the rest left for the next. the ring keeps the newest

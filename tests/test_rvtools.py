@@ -7,7 +7,7 @@ import time
 import pytest
 
 from rootview.rvprim import HookEvent
-from rootview.rvtools import Ftrace, Layout, MemWatch, Modules, Symbols, Tables, Tasks
+from rootview.rvtools import Clock, Ftrace, Layout, MemWatch, Modules, Symbols, Tables, Tasks
 from rootview.rvtools import pagehash
 from rootview.rvtools.modules import STATES
 
@@ -26,6 +26,13 @@ def test_symbols_bisect(guest):
     assert (s.name, off) == ("init_task", 1)
     assert syms.next_after(init) > init
     assert syms.at(0x1000) == (None, 0)
+
+
+def test_clock(guest):
+    clock = Clock(guest)
+    booted = clock.from_boot(0)
+    assert 2020 < booted.year and booted.timestamp() < time.time() + 60  # a minute for guest/host skew
+    assert (clock.from_boot(10**9) - booted).total_seconds() == 1
 
 
 def test_task_sources(guest):

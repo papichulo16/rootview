@@ -10,7 +10,7 @@
 | consistency | `with g.snapshot():` pauses the guest and caches reads until the block ends |
 | memory | `read(va, n)`, `read_phys(pa, n)`, `translate(va)` |
 | symbols | `sym(name)`, `sym_at(va)`, `symbols()` |
-| BTF | `field(type, path)`, `read_field(type, path, va)`, `type_size(type)`, `enum_value(name, enum=None)` |
+| BTF | `field(type, path)`, `read_field(type, path, va)`, `type_size(type)`, `enum_value(name, enum=None)`, `enum_name(enum, value)` |
 | walks | `list`/`hlist(head, type, member)`, `list_off`/`hlist_off(head, off)`, `rbtree(root)`, `idr(idr)`, `tasks()` |
 | per-cpu | `nr_cpus()`, `percpu_addr(sym, cpu)` |
 | registers | `reg(name)` (vcpu 0: `cr3`, `idtr_base`, `msr_lstar`, ...) |

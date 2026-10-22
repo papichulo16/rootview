@@ -134,6 +134,9 @@ def test_types_and_enums(guest):
     assert guest.enum_value("PIDTYPE_PID") == 0  # found without naming the enum
     with pytest.raises(RootviewError):
         guest.enum_value("NO_SUCH_ENUMERATOR_ROOTVIEW")
+    assert guest.enum_name("pid_type", 0) == guest.enum_name("enum pid_type", 0) == "PIDTYPE_PID"
+    with pytest.raises(RootviewError):
+        guest.enum_name("pid_type", 1000)
 
 
 def test_registers_point_into_the_kernel(guest):
