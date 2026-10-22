@@ -1,5 +1,6 @@
-# RootView
-## KVM-based eBPF Linux Rootkit Detection Engine
+# RootView - KVM-based eBPF Linux Rootkit Detection Engine
+
+![logo.png](images/logo.png)
 
 haur haur haur haur haur haur haur
 
