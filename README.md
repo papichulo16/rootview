@@ -25,3 +25,6 @@ You will need to install an `iso` file in order to introspect into that `iso's` 
 
 #### Python lib
 `./setup-python.sh` builds `librootview.so` and installs `rootview` into `.venv`. Then `. .venv/bin/activate`.
+
+#### Web server
+`./run-web.sh` builds the lib and serves on http://127.0.0.1:8000 (`ROOTVIEW_PORT` to change it).
