@@ -22,3 +22,6 @@ Afterwards, just run the tool outside the docker container.
 
 You will need to install an `iso` file in order to introspect into that `iso's` VM. 
  - `./rv vm [args]` - will set up your VM. Here is a default one I like: `./rv vm create test --cdrom [iso path] --display gtk`
+
+#### Python lib
+`./setup-python.sh` builds `librootview.so` and installs `rootview` into `.venv`. Then `. .venv/bin/activate`.
