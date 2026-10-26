@@ -124,7 +124,7 @@ static void build_domain_xml(const vm_config_t *cfg, const char *qmp_abs, const 
     if (kvmi_abs && kvmi_abs[0]) {
         xml_append(xml, &len,
                    "    <qemu:arg value='-chardev'/>\n"
-                   "    <qemu:arg value='socket,path=%s,id=kvmi_chardev,reconnect=10'/>\n"
+                   "    <qemu:arg value='socket,path=%s,id=kvmi_chardev,reconnect=1'/>\n"
                    "    <qemu:arg value='-object'/>\n"
                    "    <qemu:arg value='introspection,id=kvmi,chardev=kvmi_chardev'/>\n",
                    kvmi_abs);
