@@ -42,12 +42,12 @@
       <thead>
         <tr>
           <th>ID</th><th>Name</th><th>Type</th><th>Attached to</th>
-          <th>Loader</th><th>Helpers</th><th>Tag</th><th>Visibility</th>
+          <th>Loader</th><th>Helpers</th><th>Maps</th><th>Tag</th><th>Visibility</th>
         </tr>
       </thead>
       <tbody>
         {% for p in snapshot.programs %}
-        <tr class="{{ 'row-hidden' if p.visibility.value == 'hidden' }}">
+        <tr id="prog-{{ p.prog_id }}" class="{{ 'row-hidden' if p.visibility.value == 'hidden' }}">
           <td class="num">{{ p.prog_id }}</td>
           <td><code>{{ p.name }}</code></td>
           <td>{{ p.prog_type.value }}</td>
@@ -71,6 +71,9 @@
               <code class="{{ 'danger' if h in ('bpf_probe_write_user', 'bpf_override_return') }}">{{ h }}</code>
             {% endfor %}
           </td>
+          <td>
+            {% for id in p.map_ids %}<a href="#map-{{ id }}">{{ id }}</a>{{ ', ' if not loop.last }}{% else %}<span class="muted">-</span>{% endfor %}
+          </td>
           <td><code class="tag">{{ p.tag }}</code></td>
           <td>
             <span class="pill {{ 'hidden-pill' if p.visibility.value == 'hidden' }}">
@@ -79,7 +82,7 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="8" class="empty">No eBPF programs loaded.</td></tr>
+        <tr><td colspan="9" class="empty">No eBPF programs loaded.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -91,12 +94,12 @@
       <thead>
         <tr>
           <th>ID</th><th>Name</th><th>Type</th><th>Key</th>
-          <th>Value</th><th>Max entries</th><th>Visibility</th>
+          <th>Value</th><th>Max entries</th><th>Used by</th><th>Visibility</th>
         </tr>
       </thead>
       <tbody>
         {% for m in snapshot.maps %}
-        <tr class="{{ 'row-hidden' if m.visibility.value == 'hidden' }}">
+        <tr id="map-{{ m.map_id }}" class="{{ 'row-hidden' if m.visibility.value == 'hidden' }}">
           <td class="num">{{ m.map_id }}</td>
           <td><code>{{ m.name }}</code></td>
           <td>{{ m.map_type.value }}</td>
@@ -104,13 +107,16 @@
           <td class="num">{{ m.value_size }}B</td>
           <td class="num">{{ m.max_entries }}</td>
           <td>
+            {% for p in snapshot.programs if m.map_id in p.map_ids %}<a href="#prog-{{ p.prog_id }}"><code>{{ p.name }}</code></a>{{ ', ' if not loop.last }}{% else %}<span class="muted">-</span>{% endfor %}
+          </td>
+          <td>
             <span class="pill {{ 'hidden-pill' if m.visibility.value == 'hidden' }}">
               {{ m.visibility.value }}
             </span>
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="7" class="empty">No eBPF maps loaded.</td></tr>
+        <tr><td colspan="8" class="empty">No eBPF maps loaded.</td></tr>
         {% endfor %}
       </tbody>
     </table>

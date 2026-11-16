@@ -186,6 +186,19 @@ def test_scan_now_publishes_through_the_scanner(compromised_client):
     assert scanner.latest("vm-1") is not None
 
 
+def test_findings_link_to_their_introspection_row():
+    with client_with(FakeBackend(compromised_snapshot())) as c:
+        c.portal.call(c.app.state.scanner.scan_once)
+        page = c.get("/dashboard").text
+    assert "/introspect?vm=vm-1#prog-99" in page
+
+
+def test_introspect_cross_links_programs_and_maps(compromised_client):
+    page = compromised_client.get("/introspect", params={"vm": "vm-1"}).text
+    assert 'id="prog-99"' in page and 'id="map-98"' in page
+    assert 'href="#map-98"' in page
+    assert 'href="#prog-99"' in page
+
 # --------------------------------------------------------------------------
 # course project header
 # --------------------------------------------------------------------------

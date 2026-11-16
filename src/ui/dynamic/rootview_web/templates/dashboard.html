@@ -103,6 +103,9 @@
       {% if d.recommendation %}
       <p class="reco"><strong>What to do:</strong> {{ d.recommendation }}</p>
       {% endif %}
+      {% if d.prog_id is not none or d.map_id is not none %}
+      <a class="locate" href="/introspect?vm={{ d.vm_id }}#{{ 'prog-' ~ d.prog_id if d.prog_id is not none else 'map-' ~ d.map_id }}">View in introspection &rarr;</a>
+      {% endif %}
       <details>
         <summary>Evidence</summary>
         <table class="evidence">

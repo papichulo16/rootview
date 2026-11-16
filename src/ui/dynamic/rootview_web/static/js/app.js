@@ -84,6 +84,13 @@ const RootView = (() => {
       card.append(reco);
     }
 
+    const anchor = d.prog_id != null ? `prog-${d.prog_id}` : d.map_id != null ? `map-${d.map_id}` : null;
+    if (anchor) {
+      const link = el("a", "locate", "View in introspection →");
+      link.href = `/introspect?vm=${encodeURIComponent(d.vm_id)}#${anchor}`;
+      card.append(link);
+    }
+
     const evidence = d.evidence || {};
     if (Object.keys(evidence).length > 0) {
       const details = el("details");
