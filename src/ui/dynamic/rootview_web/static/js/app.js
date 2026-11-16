@@ -128,35 +128,83 @@ const RootView = (() => {
     // replay buffer does not duplicate them.
     for (const node of findings.children) seen.add(node.dataset.id);
 
-    function updateVerdict() {
+    const cardOf = (vmId) => document.querySelector(`.vm-card[data-vm="${CSS.escape(vmId)}"]`);
+    const failing = new Set(
+      [...document.querySelectorAll('.vm-card [data-role="error"]:not([hidden])')].map(
+        (node) => node.closest(".vm-card").dataset.vm,
+      ),
+    );
+    // Only a completed scan may turn the banner green.
+    let scanned = ["clear", "alert"].includes(verdict.dataset.state);
+
+    function setVerdict(state, heading, text) {
+      verdict.dataset.state = state;
+      title.textContent = heading;
+      sub.textContent = text;
+    }
+
+    function refresh() {
       const count = findings.children.length;
       countLabel.textContent = `(${count})`;
       empty.hidden = count > 0;
-      if (count === 0) return;
-
-      verdict.dataset.state = "alert";
-      title.textContent = `${count} finding${count === 1 ? "" : "s"} need attention`;
-      sub.textContent =
-        "RootView found eBPF activity in a guest that does not look legitimate.";
+      if (count > 0) {
+        setVerdict("alert", `${count} finding${count === 1 ? "" : "s"} need attention`,
+          "RootView found eBPF activity in a guest that does not look legitimate.");
+      } else if (failing.size > 0) {
+        setVerdict("degraded", `${failing.size} guest${failing.size === 1 ? "" : "s"} could not be scanned`,
+          "RootView cannot vouch for a guest it could not read. See the guest cards below.");
+      } else if (scanned) {
+        setVerdict("clear", "No suspicious eBPF activity detected",
+          "RootView is watching this system from the hypervisor.");
+      }
     }
 
-    /* Promote "waiting for the first scan" to an all-clear, but only on the
-     * evidence of a completed scan. A scan event is that evidence; nothing
-     * else in this file is allowed to set the clear state. */
-    function markScanned() {
-      if (verdict.dataset.state !== "pending") return;
-      if (findings.children.length > 0) return;
-      verdict.dataset.state = "clear";
-      title.textContent = "No suspicious eBPF activity detected";
-      sub.textContent = "RootView is watching this system from the hypervisor.";
+    function setFailure(vmId, message) {
+      if (message) failing.add(vmId);
+      else failing.delete(vmId);
+      const node = cardOf(vmId)?.querySelector('[data-role="error"]');
+      if (node) {
+        node.textContent = message || "";
+        node.hidden = !message;
+      }
+      refresh();
     }
+
+    document.addEventListener("click", async (event) => {
+      const button = event.target.closest("[data-scan]");
+      if (!button) return;
+      const vmId = button.dataset.scan;
+      const label = button.textContent;
+      button.disabled = true;
+      button.textContent = "Scanning…";
+      let outcome = "Scan failed";
+      try {
+        const response = await fetch(`/api/vms/${encodeURIComponent(vmId)}/scan`, { method: "POST" });
+        if (response.ok) {
+          const result = await response.json();
+          const found = result.detections.length;
+          outcome = `Scanned ✓ ${found} finding${found === 1 ? "" : "s"}`;
+        } else {
+          const body = await response.json().catch(() => ({}));
+          setFailure(vmId, body.detail || `scan failed (${response.status})`);
+        }
+      } catch (err) {
+        setFailure(vmId, `scan request failed: ${err.message}`);
+      } finally {
+        button.textContent = outcome;
+        setTimeout(() => {
+          button.textContent = label;
+          button.disabled = false;
+        }, 2000);
+      }
+    });
 
     connect({
       detection(d) {
         if (seen.has(d.detection_id)) return;
         seen.add(d.detection_id);
         insertBySeverity(findings, renderFinding(d), d.severity);
-        updateVerdict();
+        refresh();
 
         const card = document.querySelector(`.vm-card[data-vm="${d.vm_id}"]`);
         if (card) {
@@ -168,9 +216,16 @@ const RootView = (() => {
         }
       },
 
+      resolved(r) {
+        seen.delete(r.detection_id);
+        findings.querySelector(`[data-id="${CSS.escape(r.detection_id)}"]`)?.remove();
+        refresh();
+      },
+
       scan(s) {
-        markScanned();
-        const card = document.querySelector(`.vm-card[data-vm="${s.vm_id}"]`);
+        scanned = true;
+        setFailure(s.vm_id, null);
+        const card = cardOf(s.vm_id);
         if (!card) return;
         card.querySelector('[data-role="progs"]').textContent = s.programs_examined;
         card.querySelector('[data-role="maps"]').textContent = s.maps_examined;
@@ -178,6 +233,7 @@ const RootView = (() => {
 
       status(s) {
         console.warn("rootview status:", s.message);
+        if (s.vm_id && s.level === "error") setFailure(s.vm_id, s.message);
       },
     });
   }

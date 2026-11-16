@@ -18,6 +18,8 @@
         No introspection backend connected
       {% elif verdict == 'pending' %}
         Waiting for the first scan
+      {% elif verdict == 'degraded' %}
+        {{ scan_errors | length }} guest{{ '' if scan_errors | length == 1 else 's' }} could not be scanned
       {% else %}
         No suspicious eBPF activity detected
       {% endif %}
@@ -29,6 +31,8 @@
         RootView is not reading any guest, so it cannot tell you whether this system is clean.
       {% elif verdict == 'pending' %}
         No guest has been examined yet. This banner will update as soon as a scan completes.
+      {% elif verdict == 'degraded' %}
+        RootView cannot vouch for a guest it could not read. See the guest cards below.
       {% else %}
         RootView is watching {{ vms | selectattr('state.value', 'equalto', 'running') | list | length }}
         running guest(s) from the hypervisor.
@@ -62,12 +66,16 @@
           </dd>
         </div>
       </dl>
+      <p class="scan-error" data-role="error" {{ 'hidden' if vm.vm_id not in scan_errors }}>{{ scan_errors.get(vm.vm_id, '') }}</p>
       <footer>
         <span class="counts">
           <span data-role="progs">-</span> programs /
           <span data-role="maps">-</span> maps
         </span>
-        <span><a href="/guests/{{ vm.vm_id }}">Guest</a> · <a href="/introspect?vm={{ vm.vm_id }}">eBPF &rarr;</a></span>
+        <span>
+          {% if vm.state.value == 'running' %}<button class="btn ghost" type="button" data-scan="{{ vm.vm_id }}">Scan now</button>{% endif %}
+          <a href="/guests/{{ vm.vm_id }}">Guest</a> · <a href="/introspect?vm={{ vm.vm_id }}">eBPF &rarr;</a>
+        </span>
       </footer>
     </article>
     {% else %}

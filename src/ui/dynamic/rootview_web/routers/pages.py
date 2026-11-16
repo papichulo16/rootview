@@ -55,6 +55,8 @@ def verdict_state(
         return "alert"
     if not backend.connected:
         return "unconfigured"
+    if scanner.errors:
+        return "degraded"
     if not scanner.has_results:
         return "pending"
     return "clear"
@@ -112,6 +114,7 @@ async def dashboard(
             "vms": vms,
             "detections": detections,
             "verdict": verdict_state(backend, scanner, detections),
+            "scan_errors": scanner.errors,
             "settings": settings,
             "active": "dashboard",
             "live": True,

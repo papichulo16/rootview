@@ -13,7 +13,7 @@ import logging
 
 from rootview_web.backends.base import BackendError, IntrospectionBackend
 from rootview_web.events import Event, EventBus
-from rootview_web.schemas import Detection, ScanResult, VMState
+from rootview_web.schemas import VM, Detection, ScanResult, VMState
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +36,7 @@ class ScannerService:
         # work.
         self._reported: set[str] = set()
         self._latest: dict[str, ScanResult] = {}
+        self.errors: dict[str, str] = {}
         self._task: asyncio.Task[None] | None = None
 
     @property
@@ -69,6 +70,7 @@ class ScannerService:
         """
         self._reported.clear()
         self._latest.clear()
+        self.errors.clear()
 
     async def scan_once(self) -> list[ScanResult]:
         """Run one pass over every running guest, publishing what is new."""
@@ -82,29 +84,44 @@ class ScannerService:
             self.bus.publish(Event.status(f"Backend error listing guests: {exc}", level="error"))
             return results
 
-        for vm in vms:
-            if vm.state is not VMState.RUNNING:
-                continue
+        running = [vm for vm in vms if vm.state is VMState.RUNNING]
+        ids = {vm.vm_id for vm in running}
+        self.errors = {k: v for k, v in self.errors.items() if k in ids}
+        for vm in running:
             try:
-                result = await self.backend.scan(vm.vm_id)
-            except (BackendError, NotImplementedError) as exc:
-                # One unreadable guest must not stop the others from being
-                # scanned, so this is logged and reported rather than raised.
-                log.warning("scan of %s failed: %s", vm.vm_id, exc)
-                self.bus.publish(
-                    Event.status(f"Scan of {vm.name} failed: {exc}", level="error", vm_id=vm.vm_id)
-                )
+                results.append(await self.scan_vm(vm))
+            except (BackendError, NotImplementedError):
+                # One unreadable guest must not stop the others from being scanned.
                 continue
-
-            self._latest[vm.vm_id] = result
-            results.append(result)
-            for detection in result.detections:
-                if detection.detection_id in self._reported:
-                    continue
-                self._reported.add(detection.detection_id)
-                self.bus.publish(Event.detection(detection))
-            self.bus.publish(Event.scan(result))
         return results
+
+    async def scan_vm(self, vm: VM) -> ScanResult:
+        """Scan one guest, publish what changed, and re-raise a failure after reporting it."""
+        try:
+            result = await self.backend.scan(vm.vm_id)
+        except (BackendError, NotImplementedError) as exc:
+            log.warning("scan of %s failed: %s", vm.vm_id, exc)
+            self.errors[vm.vm_id] = str(exc)
+            self.bus.publish(
+                Event.status(f"Scan of {vm.name} failed: {exc}", level="error", vm_id=vm.vm_id)
+            )
+            raise
+
+        self.errors.pop(vm.vm_id, None)
+        current = {d.detection_id for d in result.detections}
+        previous = self._latest.get(vm.vm_id)
+        for gone in previous.detections if previous else []:
+            if gone.detection_id not in current:
+                self._reported.discard(gone.detection_id)
+                self.bus.publish(Event.resolved(gone))
+        self._latest[vm.vm_id] = result
+        for detection in result.detections:
+            if detection.detection_id in self._reported:
+                continue
+            self._reported.add(detection.detection_id)
+            self.bus.publish(Event.detection(detection))
+        self.bus.publish(Event.scan(result))
+        return result
 
     async def _loop(self) -> None:
         while True:

@@ -40,6 +40,10 @@ class Event(dict):
         return cls(type="detection", data=detection.model_dump(mode="json"))
 
     @classmethod
+    def resolved(cls, detection: Detection) -> "Event":
+        return cls(type="resolved", data={"detection_id": detection.detection_id, "vm_id": detection.vm_id})
+
+    @classmethod
     def scan(cls, result: ScanResult) -> "Event":
         """A completed scan pass, without the detections themselves.
 

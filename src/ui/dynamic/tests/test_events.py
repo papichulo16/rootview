@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import asyncio
 
+from rootview_web.backends.base import BackendError
 from rootview_web.events import Event, EventBus, format_sse, sse_source
 from rootview_web.services import ScannerService
-from tests.conftest import FakeBackend, compromised_snapshot
+from tests.conftest import FakeBackend, clean_snapshot, compromised_snapshot
 
 
 def test_format_sse_encodes_type_and_payload():
@@ -199,3 +200,44 @@ def test_scanner_forget_allows_realerting():
 
     before, after = asyncio.run(scenario())
     assert after == before * 2
+
+
+def test_resolved_finding_is_announced_and_can_realert():
+    async def scenario():
+        backend = FakeBackend(compromised_snapshot())
+        bus = EventBus()
+        scanner = ScannerService(backend, bus, interval=0.01)
+        await scanner.scan_once()
+        first = len([e for e in bus.history() if e["type"] == "detection"])
+        backend.snapshot_to_return = clean_snapshot()
+        await scanner.scan_once()
+        resolved = len([e for e in bus.history() if e["type"] == "resolved"])
+        backend.snapshot_to_return = compromised_snapshot()
+        await scanner.scan_once()
+        total = len([e for e in bus.history() if e["type"] == "detection"])
+        return first, resolved, total
+
+    first, resolved, total = asyncio.run(scenario())
+    assert resolved == first
+    assert total == first * 2
+
+
+def test_scan_failure_is_tracked_per_guest_until_it_recovers():
+    async def scenario():
+        backend = FakeBackend(clean_snapshot())
+        real_scan = backend.scan
+
+        async def broken(vm_id):
+            raise BackendError("no kernel profile")
+
+        backend.scan = broken
+        scanner = ScannerService(backend, EventBus(), interval=0.01)
+        await scanner.scan_once()
+        failed = dict(scanner.errors)
+        backend.scan = real_scan
+        await scanner.scan_once()
+        return failed, scanner.errors
+
+    failed, after = asyncio.run(scenario())
+    assert failed == {"vm-1": "no kernel profile"}
+    assert after == {}

@@ -7,6 +7,7 @@ from markupsafe import escape
 
 from rootview_web import deliverables
 from rootview_web.app import build_backend
+from rootview_web.backends.base import BackendError
 from rootview_web.backends.libvmi import LibVMIBackend
 from rootview_web.config import Settings
 from rootview_web.templating import STATIC_DIR
@@ -156,6 +157,33 @@ def test_dashboard_reports_findings_when_they_exist():
         page = c.get("/dashboard").text
     assert "need attention" in page
     assert "Hidden eBPF program" in page
+
+
+
+def test_dashboard_does_not_claim_clear_while_a_guest_fails_to_scan():
+    backend = FakeBackend()
+
+    async def broken(vm_id):
+        raise BackendError("no kernel profile")
+
+    backend.scan = broken
+    with client_with(backend) as c:
+        c.portal.call(c.app.state.scanner.scan_once)
+        page = c.get("/dashboard").text
+    assert 'data-state="degraded"' in page
+    assert "no kernel profile" in page
+
+
+def test_scan_now_publishes_through_the_scanner(compromised_client):
+    scanner = compromised_client.app.state.scanner
+    bus = compromised_client.app.state.bus
+    scanner.forget()
+    mark = len(bus.history())
+    compromised_client.post("/api/vms/vm-1/scan")
+    compromised_client.post("/api/vms/vm-1/scan")
+    published = [e["data"]["detection_id"] for e in bus.history()[mark:] if e["type"] == "detection"]
+    assert len(published) == len(set(published)) > 0
+    assert scanner.latest("vm-1") is not None
 
 
 # --------------------------------------------------------------------------
@@ -325,7 +353,7 @@ def test_api_reports_unimplemented_as_501():
     """501 says the backend is unwritten; 500 would blame the web server."""
     with client_with(UnfinishedBackend()) as c:
         assert c.get("/api/vms").status_code == 501
-        assert c.post("/api/vms/x/scan").status_code == 501
+        assert c.post("/api/vms/vm-1/scan").status_code == 501
 
 
 def test_openapi_schema_is_generated(unconfigured_client):

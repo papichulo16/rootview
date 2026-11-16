@@ -73,16 +73,17 @@ async def get_snapshot(
 
 @router.post("/vms/{vm_id}/scan", response_model=ScanResult)
 async def scan_vm(
-    vm_id: str, backend: IntrospectionBackend = Depends(get_backend)
+    vm_id: str,
+    backend: IntrospectionBackend = Depends(get_backend),
+    scanner: ScannerService = Depends(get_scanner),
 ) -> ScanResult:
     """Run the detection rules against a guest right now.
 
-    Does not wait for the polling interval. Findings from an on-demand scan are
-    returned to the caller but are not published to the event stream, so a user
-    clicking "scan now" does not spam every other open dashboard.
+    Goes through the scanner, so only findings not already announced reach the
+    event stream and every open dashboard stays consistent.
     """
     try:
-        return await backend.scan(vm_id)
+        return await scanner.scan_vm(await backend.get_vm(vm_id))
     except UnknownVMError:
         raise
     except BackendError as exc:
