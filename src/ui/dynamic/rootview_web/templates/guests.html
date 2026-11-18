@@ -71,6 +71,40 @@
   </div>
   {% endif %}
 </section>
+
+{% if connected %}
+<section class="panel">
+  <div class="panel-head"><h2>Phones</h2></div>
+  {% if phone_error %}
+  <p class="error">Could not list phones: {{ phone_error }}</p>
+  {% else %}
+  <div class="table-scroll">
+    <table class="data">
+      <thead>
+        <tr><th>Serial</th><th>Model</th><th>Status</th><th>pkvmi</th><th>Profile</th></tr>
+      </thead>
+      <tbody>
+        {% for p in phones %}
+        <tr>
+          <td>{% if p.pkvmi %}<a href="/phones/{{ p.serial }}"><code>{{ p.serial }}</code></a>{% else %}<code>{{ p.serial }}</code>{% endif %}</td>
+          <td>{{ p.model or '-' }}</td>
+          <td><span class="pill state-{{ 'running' if p.connected else 'shut_off' }}">{{ 'connected' if p.connected else p.state }}</span></td>
+          <td>{{ 'yes' if p.pkvmi else 'no' }}</td>
+          <td>
+            {% if p.profile_loaded %}loaded
+            {% elif p.profile_error %}<span class="warn" title="{{ p.profile_error }}">failed</span>
+            {% else %}<span class="muted">not attached</span>{% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="empty">No phones on adb. Plug one in with USB debugging on, or point <code>ADB_SERVER_SOCKET</code> at the adb server it's on.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}

@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 from rootview_web.backends.base import BackendError
 from rootview_web.config import Settings
 from rootview_web.deps import get_settings
+from rootview_web.routers import phones as phone_routes
 from rootview_web.routers.vms import details, details_of
 from rootview_web.templating import templates
 
@@ -28,13 +29,20 @@ def _page(request: Request, name: str, settings: Settings, **context) -> HTMLRes
 @router.get("/guests", response_class=HTMLResponse)
 async def guests(request: Request, settings: Settings = Depends(get_settings)):
     engine = _engine(request)
-    vms, error = [], None
+    vms, error, phones, phone_error = [], None, [], None
     if engine is not None:
         try:
             vms = [details_of(engine, vm) for vm in await engine.vm(engine.prim.list_vms)]
         except BackendError as exc:
             error = str(exc)
-    return _page(request, "guests.html", settings, connected=engine is not None, vms=vms, error=error)
+        try:
+            phones = [phone_routes.details_of(engine, p) for p in await engine.vm(engine.prim.list_phones)]
+        except BackendError as exc:
+            phone_error = str(exc)
+    return _page(
+        request, "guests.html", settings, connected=engine is not None, vms=vms, error=error, phones=phones,
+        phone_error=phone_error,
+    )
 
 
 @router.get("/guests/{vm_id}", response_class=HTMLResponse)
@@ -48,5 +56,21 @@ async def guest(request: Request, vm_id: str, settings: Settings = Depends(get_s
             error = str(exc)
     status = 404 if engine is not None and vm is None else 200
     response = _page(request, "guest.html", settings, connected=engine is not None, vm=vm, vm_id=vm_id, error=error)
+    response.status_code = status
+    return response
+
+
+@router.get("/phones/{serial}", response_class=HTMLResponse)
+async def phone(request: Request, serial: str, settings: Settings = Depends(get_settings)):
+    engine = _engine(request)
+    p, error = None, None
+    if engine is not None:
+        try:
+            p = await phone_routes.details(engine, serial)
+        except BackendError as exc:
+            error = str(exc)
+    status = 404 if engine is not None and p is None else 200
+    response = _page(request, "phone.html", settings, connected=engine is not None, phone=p, serial=serial,
+                     error=error)
     response.status_code = status
     return response

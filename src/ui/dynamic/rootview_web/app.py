@@ -15,7 +15,7 @@ from rootview_web.backends.unconfigured import UnconfiguredBackend
 from rootview_web.config import Settings
 from rootview_web.engine import GuestPool
 from rootview_web.events import EventBus
-from rootview_web.routers import api, engine as engine_routes, guest, guest_pages, hooks, pages, vms
+from rootview_web.routers import api, engine as engine_routes, guest, guest_pages, hooks, pages, phones, vms
 from rootview_web.services import ScannerService
 from rootview_web.templating import STATIC_DIR
 
@@ -73,6 +73,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.include_router(api.router)
     app.include_router(vms.router)
+    app.include_router(phones.router)
     app.include_router(guest.router)
     app.include_router(hooks.router)
     app.include_router(engine_routes.router)

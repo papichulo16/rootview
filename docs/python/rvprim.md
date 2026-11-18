@@ -13,6 +13,7 @@ it as a context manager. Every call below is the same on both backends.
 | Area | Calls |
 |---|---|
 | guests | `list_vms()`, `set_base(dir)`, `Rootview(backend, target)`, `Guest(name)`, `close()` |
+| phones | `list_phones()`, `inspect_phone(serial)`: every adb device, its state, and `pkvmi` (ready for pkvm-vmi) |
 | kernel | `info()`: release, image bounds, symbol and type counts, `init_task` |
 | consistency | `with g.snapshot():` pauses the guest and caches reads until the block ends |
 | memory | `read(va, n)`, `read_phys(pa, n)`, `translate(va)` |

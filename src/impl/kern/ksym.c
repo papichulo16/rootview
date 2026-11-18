@@ -417,6 +417,20 @@ int ksym_load(const kimg_t *img, const ksym_cfg_t *cfg, ksym_table_t *tab, char 
 
 /* ---- lookups ---- */
 
+#define LTO_SUFFIX ".llvm."
+
+/* clang LTO renames a promoted static to name.llvm.<hash>: the first such */
+static const ksym_t *ksym_by_lto_name(const ksym_table_t *tab, const char *name) {
+    const ksym_t *found = NULL;
+    size_t len = strlen(name);
+
+    for (size_t i = 0; i < tab->n && !found; i++)
+        if (strncmp(tab->syms[i].name, name, len) == 0 &&
+            strncmp(tab->syms[i].name + len, LTO_SUFFIX, strlen(LTO_SUFFIX)) == 0)
+            found = &tab->syms[i];
+    return found;
+}
+
 const ksym_t *ksym_by_name(const ksym_table_t *tab, const char *name) {
     if (!tab->hash_cap) return NULL;
     size_t h = hash_name(name) & (tab->hash_cap - 1);
@@ -424,7 +438,7 @@ const ksym_t *ksym_by_name(const ksym_table_t *tab, const char *name) {
         const ksym_t *s = &tab->syms[tab->hash[h] - 1];
         if (strcmp(s->name, name) == 0) return s;
     }
-    return NULL;
+    return ksym_by_lto_name(tab, name);
 }
 
 const ksym_t *ksym_by_addr(const ksym_table_t *tab, uint64_t addr, uint64_t *off) {

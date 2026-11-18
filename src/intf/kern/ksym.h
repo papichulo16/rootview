@@ -72,7 +72,8 @@ int ksym_load(const kimg_t *img, const ksym_cfg_t *cfg, ksym_table_t *tab, char 
 int ksym_check_banner(const kimg_t *img, const ksym_table_t *tab, char *banner, size_t banner_len, char *err,
                       size_t err_len);
 
-/* first symbol with that name, in address order */
+/* first symbol with that name, in address order; failing that, its clang LTO
+ * rename (name.llvm.<hash>), which is how statics show up on Android kernels */
 const ksym_t *ksym_by_name(const ksym_table_t *tab, const char *name);
 
 /* last symbol at or below addr (the last of several at the same address);

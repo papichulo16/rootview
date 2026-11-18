@@ -50,6 +50,8 @@ To publish deliverable, drop the file in
 | `/` | Landing page — what the project is, why eBPF rootkits are hard to find, how RootView works. Static; opens no event stream. |
 | `/dashboard` | One-line verdict, guest cards, live findings. For a user with no eBPF knowledge. |
 | `/introspect` | Raw eBPF program and map tables for one guest. For someone who wants to read the state themselves. |
+| `/guests` | VMs and phones on adb, with their state and profile; start, stop and create VMs. |
+| `/phones/{serial}` | One phone over pkvm-vmi: kernel, processes, EL1/EL2 registers, memory, symbols and BTF. |
 | `/docs` | Auto-generated OpenAPI docs for the JSON API. |
 
 ## API
@@ -58,6 +60,8 @@ To publish deliverable, drop the file in
 | --- | --- |
 | `GET /api/health` | Liveness, plus whether a backend is actually connected |
 | `GET /api/vms` | Guests available for introspection |
+| `GET /api/phones` | Phones on adb: state, model, whether pkvmi is ready, profile status |
+| `GET /api/vms/{serial}/...` | The guest tool routes also take a phone's adb serial (pkvm-vmi) |
 | `GET /api/vms/{id}/snapshot` | Raw eBPF state, no detection logic applied |
 | `POST /api/vms/{id}/scan` | Run the detection rules right now |
 | `GET /api/detections` | Currently-standing findings (`?vm_id=` to filter) |

@@ -17,6 +17,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -174,6 +176,8 @@ class VM(BaseModel):
     state: VMState
     guest: GuestInfo = Field(default_factory=GuestInfo)
     last_scan: datetime | None = None
+    #: "phone" is an Android phone on adb, introspected over pkvm-vmi; vm_id is its serial
+    kind: Literal["vm", "phone"] = "vm"
 
 
 class BpfSnapshot(BaseModel):

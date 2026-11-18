@@ -27,7 +27,7 @@ You will need to install an `iso` file in order to introspect into that `iso's` 
 `./setup-python.sh` builds `librootview.so` and installs `rootview` into `.venv`. Then `. .venv/bin/activate`.
 
 #### Phone (pkvm-vmi)
-rootview can also read a Pixel's own kernel from EL2 through [pkvmi-mod](../pkvmi-mod): flash its `local` build, put its CLI at `/data/local/tmp/pkvmi`, and have `adb` on `PATH` with the phone rooted (`su`). Then `Rootview("pkvm-vmi")` instead of `Rootview("kvm-vmi", "myvm")`; the API is the same. From inside the kvmi-vm, reach the host's adb server with `ADB_SERVER_SOCKET=tcp:10.0.2.2:5037`.
+rootview can also read a Pixel's own kernel from EL2 through [pkvmi-mod](../pkvmi-mod): flash its `local` build, put its CLI at `/data/local/tmp/pkvmi`, and have `adb` on `PATH` with the phone rooted (`su`). Then `Rootview("pkvm-vmi")` instead of `Rootview("kvm-vmi", "myvm")`; the API is the same. From inside the kvmi-vm, reach the host's adb server by forwarding its port when you ssh in: `ssh -R 5037:127.0.0.1:5037 -p 2222 vmiuser@localhost` (then plain `adb` in the VM talks to the host's server), or set `ADB_SERVER_SOCKET=tcp:10.0.2.2:5037`. The web UI's Guests page lists phones next to the VMs; `/phones/<serial>` introspects one.
 
 #### Web server
 `./run-web.sh` builds the lib and serves on http://127.0.0.1:8000 (`ROOTVIEW_PORT` to change it).
