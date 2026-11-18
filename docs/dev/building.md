@@ -7,6 +7,11 @@ pip install -e .
 ```
 
 Needs libvmi and libvirt, and a host running the KVMI kernel (kvmi-vm).
+The pkvm-vmi backend builds into the same lib; using it needs `adb` on `PATH`
+and pkvmi-mod running on the phone (see the README).
+
+The Makefile doesn't track headers: `make clean` after changing one, or
+objects built against the old struct layouts crash at runtime.
 
 Attaching needs a guest started with kvmi: `./rv vm start <vm>`, then wait ~90s.
 
