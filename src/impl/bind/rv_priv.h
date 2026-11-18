@@ -27,6 +27,9 @@ void rv_set_err(char *err, size_t err_len, const char *msg);
 
 int rv_need_prof(const rv_handle_t *h, char *err, size_t err_len);
 
+/* hooks are libvmi events: kvm-vmi only */
+int rv_need_hooks(const rv_handle_t *h, char *err, size_t err_len);
+
 void rv_prof_free(rv_handle_t *h);
 
 #endif

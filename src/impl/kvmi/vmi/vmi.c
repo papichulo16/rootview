@@ -6,15 +6,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "vmi/vmi_ops.h"
+#include "vmi/vmi_reg_names.h"
 #include "vm/vm_state.h"
 #include "vm/vm_store.h"
 
-int vmi_attach(const char *vm_name, vmi_session_t *session, char *err, size_t err_len) {
-    if (session->attached) {
-        if (err) snprintf(err, err_len, "session is already attached to '%s'", session->vm_name);
-        return -1;
-    }
-
+static int kvmi_attach(const char *vm_name, vmi_session_t *session, char *err, size_t err_len) {
     if (!vm_store_exists(vm_name)) {
         if (err) snprintf(err, err_len, "vm '%s' does not exist", vm_name);
         return -1;
@@ -64,17 +61,11 @@ out:
     return rc;
 }
 
-void vmi_detach(vmi_session_t *session) {
-    if (!session->attached) return;
+static void kvmi_detach(vmi_session_t *session) {
     vmi_destroy(session->vmi);
-    memset(session, 0, sizeof(*session));
 }
 
-bool vmi_is_attached(const vmi_session_t *session) {
-    return session->attached;
-}
-
-int vmi_read_phys(vmi_session_t *session, uint64_t paddr, void *buf, size_t len, char *err, size_t err_len) {
+static int kvmi_read_phys(vmi_session_t *session, uint64_t paddr, void *buf, size_t len, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");
         return -1;
@@ -89,7 +80,7 @@ int vmi_read_phys(vmi_session_t *session, uint64_t paddr, void *buf, size_t len,
     return 0;
 }
 
-int vmi_write_phys(vmi_session_t *session, uint64_t paddr, const void *buf, size_t len, char *err, size_t err_len) {
+static int kvmi_write_phys(vmi_session_t *session, uint64_t paddr, const void *buf, size_t len, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");
         return -1;
@@ -140,7 +131,7 @@ static void dtb_access_context(vmi_session_t *session, addr_t dtb, uint64_t vadd
     };
 }
 
-int vmi_read_virt(vmi_session_t *session, uint64_t vaddr, void *buf, size_t len, char *err, size_t err_len) {
+static int kvmi_read_virt(vmi_session_t *session, uint64_t vaddr, void *buf, size_t len, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");
         return -1;
@@ -161,7 +152,7 @@ int vmi_read_virt(vmi_session_t *session, uint64_t vaddr, void *buf, size_t len,
     return 0;
 }
 
-int vmi_write_virt(vmi_session_t *session, uint64_t vaddr, const void *buf, size_t len, char *err, size_t err_len) {
+static int kvmi_write_virt(vmi_session_t *session, uint64_t vaddr, const void *buf, size_t len, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");
         return -1;
@@ -182,7 +173,7 @@ int vmi_write_virt(vmi_session_t *session, uint64_t vaddr, const void *buf, size
     return 0;
 }
 
-int vmi_translate_virt(vmi_session_t *session, uint64_t vaddr, uint64_t *paddr, char *err, size_t err_len) {
+static int kvmi_translate_virt(vmi_session_t *session, uint64_t vaddr, uint64_t *paddr, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");
         return -1;
@@ -201,7 +192,7 @@ int vmi_translate_virt(vmi_session_t *session, uint64_t vaddr, uint64_t *paddr, 
     return 0;
 }
 
-int vmi_pause(vmi_session_t *session, char *err, size_t err_len) {
+static int kvmi_pause(vmi_session_t *session, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");
         return -1;
@@ -213,7 +204,7 @@ int vmi_pause(vmi_session_t *session, char *err, size_t err_len) {
     return 0;
 }
 
-int vmi_resume(vmi_session_t *session, char *err, size_t err_len) {
+static int kvmi_resume(vmi_session_t *session, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");
         return -1;
@@ -225,7 +216,7 @@ int vmi_resume(vmi_session_t *session, char *err, size_t err_len) {
     return 0;
 }
 
-int vmi_read_reg(vmi_session_t *session, reg_t reg, uint64_t *value, char *err, size_t err_len) {
+static int kvmi_read_reg(vmi_session_t *session, reg_t reg, uint64_t *value, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");
         return -1;
@@ -237,7 +228,7 @@ int vmi_read_reg(vmi_session_t *session, reg_t reg, uint64_t *value, char *err, 
     return 0;
 }
 
-int vmi_write_reg(vmi_session_t *session, reg_t reg, uint64_t value, char *err, size_t err_len) {
+static int kvmi_write_reg(vmi_session_t *session, reg_t reg, uint64_t value, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");
         return -1;
@@ -249,7 +240,7 @@ int vmi_write_reg(vmi_session_t *session, reg_t reg, uint64_t value, char *err, 
     return 0;
 }
 
-int vmi_read_regs(vmi_session_t *session, x86_registers_t *regs, char *err, size_t err_len) {
+static int kvmi_read_regs(vmi_session_t *session, x86_registers_t *regs, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");
         return -1;
@@ -262,3 +253,51 @@ int vmi_read_regs(vmi_session_t *session, x86_registers_t *regs, char *err, size
     *regs = full.x86;
     return 0;
 }
+
+static int kvmi_read_reg_name(vmi_session_t *session, const char *name, uint64_t *value, char *err, size_t err_len) {
+    reg_t reg;
+    if (vmi_reg_lookup(name, &reg) != 0) {
+        if (err) snprintf(err, err_len, "unknown register '%s'", name);
+        return -1;
+    }
+    return kvmi_read_reg(session, reg, value, err, err_len);
+}
+
+static int kvmi_write_reg_name(vmi_session_t *session, const char *name, uint64_t value, char *err, size_t err_len) {
+    reg_t reg;
+    if (vmi_reg_lookup(name, &reg) != 0) {
+        if (err) snprintf(err, err_len, "unknown register '%s'", name);
+        return -1;
+    }
+    if (!vmi_reg_write_supported(reg)) {
+        if (err) snprintf(err, err_len, "'%s' can't be written: only rax..r15, rip and rflags", name);
+        return -1;
+    }
+    return kvmi_write_reg(session, reg, value, err, err_len);
+}
+
+/* the syscall entry point, always in the image's text */
+static int kvmi_kernel_anchor(vmi_session_t *session, uint64_t *vaddr, char *err, size_t err_len) {
+    return kvmi_read_reg(session, MSR_LSTAR, vaddr, err, err_len);
+}
+
+const vmi_ops_t g_kvmi_ops = {
+    .name = VMI_BACKEND_KVMI,
+    .arch = VMI_ARCH_X86_64,
+    .hooks = true,
+    .attach = kvmi_attach,
+    .detach = kvmi_detach,
+    .read_phys = kvmi_read_phys,
+    .write_phys = kvmi_write_phys,
+    .read_virt = kvmi_read_virt,
+    .write_virt = kvmi_write_virt,
+    .translate_virt = kvmi_translate_virt,
+    .pause = kvmi_pause,
+    .resume = kvmi_resume,
+    .read_reg_name = kvmi_read_reg_name,
+    .write_reg_name = kvmi_write_reg_name,
+    .kernel_anchor = kvmi_kernel_anchor,
+    .read_reg = kvmi_read_reg,
+    .write_reg = kvmi_write_reg,
+    .read_regs = kvmi_read_regs,
+};

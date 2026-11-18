@@ -53,15 +53,17 @@ const char *ksym_addr_name(ksym_addr_t addr);
 
 /* the switches for the kernel that printed banner ("Linux version X.Y..."):
  * the version picks the layout and the cutoff for absolute percpu, and the
- * banner's " SMP " says whether absolute percpu was possible at all */
-int ksym_cfg_from_banner(const char *banner, ksym_cfg_t *cfg, char *err, size_t err_len);
+ * banner's " SMP " says whether absolute percpu was possible at all (only
+ * ever on x86_64) */
+int ksym_cfg_from_banner(const char *banner, vmi_arch_t arch, ksym_cfg_t *cfg, char *err, size_t err_len);
 
 /* raw scan of the loaded runs for "Linux version ". fills up to max hit
  * addresses and returns how many there were in total. */
 size_t ksym_banner_scan(const kimg_t *img, uint64_t *hits, size_t max);
 
 /* finds and decodes the tables. on top of the structural checks, the
- * addresses must be non-decreasing and _text must decode to img->start. */
+ * addresses must be non-decreasing and _text must decode to img->start
+ * (on arm64: to the unmapped header just below it, from img->text_min). */
 int ksym_load(const kimg_t *img, const ksym_cfg_t *cfg, ksym_table_t *tab, char *err, size_t err_len);
 
 /* resolves linux_banner, reads it out of the loaded runs and checks it

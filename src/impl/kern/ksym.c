@@ -276,9 +276,9 @@ static bool decode(const view_t *v, const kimg_t *img, const ksym_cfg_t *cfg, co
                    uint64_t offsets, uint64_t relbase_va, ksym_table_t *tab, char *err, size_t err_len) {
     uint64_t base;
     if (!rd64(v, relbase_va, &base)) FAIL("kallsyms_relative_base at 0x%" PRIx64 " isn't loaded", relbase_va);
-    if (base < img->start || base >= img->end)
+    if (base < img->text_min || base >= img->end)
         FAIL("kallsyms_relative_base 0x%" PRIx64 " is outside the image 0x%" PRIx64 "-0x%" PRIx64, base,
-             img->start, img->end);
+             img->text_min, img->end);
     if (!in_view(v, offsets, 4ull * nm->n)) FAIL("kallsyms_offsets at 0x%" PRIx64 " isn't loaded", offsets);
 
     /* sizing pass, so the names can live in one arena */
@@ -326,7 +326,7 @@ static bool decode(const view_t *v, const kimg_t *img, const ksym_cfg_t *cfg, co
 
     const ksym_t *text = ksym_by_name(tab, "_text");
     if (!text) FAIL("no _text symbol");
-    if (text->addr != img->start)
+    if (text->addr < img->text_min || text->addr > img->start)
         FAIL("_text decodes to 0x%" PRIx64 ", but the image starts at 0x%" PRIx64, text->addr, img->start);
     tab->relative_base = base;
     return true;
@@ -344,7 +344,10 @@ static bool try_hit(const view_t *v, const kimg_t *img, const ksym_cfg_t *cfg, u
 
     names_t nm;
     uint64_t seqs;
-    if (!locate_names(v, cfg->layout, t.tt, &nm, &seqs))
+    /* android14-6.1 backports kallsyms_seqs_of_names, so a v5 kernel can carry
+     * the 6.2 layout; everything else about the two is the same */
+    if (!locate_names(v, cfg->layout, t.tt, &nm, &seqs) &&
+        !(cfg->layout == KSYM_LAYOUT_V5 && locate_names(v, KSYM_LAYOUT_V6_2, t.tt, &nm, &seqs)))
         FAIL("token_table at 0x%" PRIx64 ", but no markers/names/num_syms fit the %s layout before it", t.tt,
              ksym_layout_name(cfg->layout));
 
@@ -459,7 +462,7 @@ const char *ksym_addr_name(ksym_addr_t addr) {
     return addr == KSYM_ADDR_ABS_PERCPU ? "absolute-percpu" : "relative";
 }
 
-int ksym_cfg_from_banner(const char *banner, ksym_cfg_t *cfg, char *err, size_t err_len) {
+int ksym_cfg_from_banner(const char *banner, vmi_arch_t arch, ksym_cfg_t *cfg, char *err, size_t err_len) {
     unsigned maj, min;
     if (strncmp(banner, BANNER, strlen(BANNER)) != 0 || sscanf(banner + strlen(BANNER), "%u.%u", &maj, &min) != 2) {
         if (err) snprintf(err, err_len, "not a linux banner: '%.40s'", banner);
@@ -477,7 +480,7 @@ int ksym_cfg_from_banner(const char *banner, ksym_cfg_t *cfg, char *err, size_t 
     bool smp = false;
     for (const char *p = banner; (p = strstr(p, " SMP")) != NULL; p++)
         smp |= p[4] == ' ' || p[4] == '\0' || p[4] == '\n';
-    cfg->addr = v < 6015 && smp ? KSYM_ADDR_ABS_PERCPU : KSYM_ADDR_RELATIVE;
+    cfg->addr = arch == VMI_ARCH_X86_64 && v < 6015 && smp ? KSYM_ADDR_ABS_PERCPU : KSYM_ADDR_RELATIVE;
     return 0;
 }
 

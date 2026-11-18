@@ -14,7 +14,7 @@
 #define BANNER_HITS_MAX 16
 
 static const char *const STEP_NAMES[KPROF_STEPS + 1] = {
-    "", "pause", "lstar", "image", "kallsyms", "banner", "btf", "init_task.comm", "resume",
+    "", "pause", "anchor", "image", "kallsyms", "banner", "btf", "init_task.comm", "resume",
 };
 
 const char *kprof_step_name(int step) {
@@ -29,13 +29,13 @@ static void banner_at(const kimg_t *img, uint64_t va, char *out, size_t out_len)
 }
 
 /* step 4's switches: from the first raw hit that parses as a banner */
-static int cfg_from_scan(const kimg_t *img, ksym_cfg_t *cfg, char *err, size_t err_len) {
+static int cfg_from_scan(const kimg_t *img, vmi_arch_t arch, ksym_cfg_t *cfg, char *err, size_t err_len) {
     uint64_t hits[BANNER_HITS_MAX];
     size_t n = ksym_banner_scan(img, hits, BANNER_HITS_MAX);
     for (size_t i = 0; i < n && i < BANNER_HITS_MAX; i++) {
         char b[512];
         banner_at(img, hits[i], b, sizeof(b));
-        if (ksym_cfg_from_banner(b, cfg, NULL, 0) == 0) return 0;
+        if (ksym_cfg_from_banner(b, arch, cfg, NULL, 0) == 0) return 0;
     }
     if (err) snprintf(err, err_len, "%zu raw \"" BANNER "\" hit(s) in the image, none parse as a banner", n);
     return -1;
@@ -91,23 +91,23 @@ int kprof_init(kprof_t *kp, vmi_session_t *session, char *err, size_t err_len) {
     paused = true;
 
     step = 2;
-    uint64_t lstar;
-    if (vmi_read_reg(session, MSR_LSTAR, &lstar, e, sizeof(e)) != 0) goto fail;
+    uint64_t anchor;
+    if (vmi_kernel_anchor(session, &anchor, e, sizeof(e)) != 0) goto fail;
 
     step = 3;
-    if (kimg_load(session, lstar, &img, e, sizeof(e)) != 0) goto fail;
+    if (kimg_load(session, anchor, &img, e, sizeof(e)) != 0) goto fail;
     kp->img_start = img.start;
     kp->img_end = img.end;
 
     step = 4;
     ksym_cfg_t cfg;
-    if (cfg_from_scan(&img, &cfg, e, sizeof(e)) != 0) goto fail;
+    if (cfg_from_scan(&img, vmi_arch(session), &cfg, e, sizeof(e)) != 0) goto fail;
     if (ksym_load(&img, &cfg, &kp->ksym, e, sizeof(e)) != 0) goto fail;
 
     step = 5;
     if (ksym_check_banner(&img, &kp->ksym, kp->banner, sizeof(kp->banner), e, sizeof(e)) != 0) goto fail;
     ksym_cfg_t cfg2;
-    if (ksym_cfg_from_banner(kp->banner, &cfg2, e, sizeof(e)) != 0) goto fail;
+    if (ksym_cfg_from_banner(kp->banner, vmi_arch(session), &cfg2, e, sizeof(e)) != 0) goto fail;
     if (cfg2.layout != cfg.layout || cfg2.addr != cfg.addr) {
         snprintf(e, sizeof(e), "linux_banner picks %s/%s, but kallsyms was decoded as %s/%s",
                  ksym_layout_name(cfg2.layout), ksym_addr_name(cfg2.addr), ksym_layout_name(cfg.layout),

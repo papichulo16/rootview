@@ -1,5 +1,5 @@
 from rootview.rvprim._lib import RootviewError, lib
-from rootview.rvprim.guest import Guest
+from rootview.rvprim.guest import Guest, Rootview
 from rootview.rvprim.kernel import WALK_MAX
 from rootview.rvprim.types import BtfType, Field, Hook, HookEvent, KernelInfo, Symbol, Task, Value, Vm, VmConfig
 from rootview.rvprim.vm import (
@@ -23,6 +23,7 @@ __all__ = [
     "Hook",
     "HookEvent",
     "KernelInfo",
+    "Rootview",
     "RootviewError",
     "Symbol",
     "Task",
