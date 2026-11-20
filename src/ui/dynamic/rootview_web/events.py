@@ -55,6 +55,7 @@ class Event(dict):
             data={
                 "vm_id": result.vm_id,
                 "finished_at": result.finished_at.isoformat(),
+                "duration_ms": round((result.finished_at - result.started_at).total_seconds() * 1000),
                 "programs_examined": result.programs_examined,
                 "maps_examined": result.maps_examined,
                 "detection_count": len(result.detections),

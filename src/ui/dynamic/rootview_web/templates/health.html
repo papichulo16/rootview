@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}RootView - Health{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', path='/css/guest.css') }}">{% endblock %}
+
+{% block content %}
+<section class="panel">
+  <h2>Engine</h2>
+  <dl class="kv">
+    <div><dt>Backend</dt><dd>{{ settings.backend }}</dd></div>
+    <div><dt>Introspection</dt><dd>
+      <span class="pill {{ 'state-running' if connected else 'warn-pill' }}">{{ 'connected' if connected else 'not connected' }}</span>
+    </dd></div>
+    <div><dt>Scanner</dt><dd>
+      <span class="pill {{ 'state-running' if scanner_running else 'warn-pill' }}">{{ 'running' if scanner_running else 'stopped' }}</span>
+      every {{ settings.scan_interval }}s
+    </dd></div>
+    <div><dt>Kernel tools</dt><dd>{{ 'available' if engine_ready else 'unavailable (ROOTVIEW_BACKEND=libvmi)' }}</dd></div>
+    <div><dt>Guest writes</dt><dd>{{ 'enabled' if settings.allow_writes else 'disabled' }}</dd></div>
+    <div><dt>Other live pages</dt><dd>{{ subscribers }}</dd></div>
+  </dl>
+</section>
+
+<section class="panel">
+  <h2>Guests</h2>
+  {% if not rows %}
+  <p class="empty">
+    {% if connected %}No guests found.{% else %}No introspection backend is connected, so no guest can be checked.{% endif %}
+  </p>
+  {% else %}
+  <div class="table-scroll">
+    <table class="data" id="health-guests" data-interval="{{ settings.scan_interval }}" data-kernel="{{ engine_ready | tojson }}">
+      <thead>
+        <tr>
+          <th>Guest</th><th>State</th><th>Kernel</th><th>Profile</th><th>BTF / symbols</th>
+          <th>Last scan</th><th>Scan time</th><th>Programs / maps</th><th>Findings</th><th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        {% set vm, scan = r.vm, r.scan %}
+        {% set running = vm.state.value == 'running' %}
+        <tr data-vm="{{ vm.vm_id }}" data-running="{{ running | tojson }}">
+          <td><a href="/guests/{{ vm.vm_id }}"><code>{{ vm.name }}</code></a></td>
+          <td><span class="pill state-{{ vm.state.value }}">{{ vm.state.value.replace('_', ' ') }}</span></td>
+          <td><code>{{ vm.guest.kernel_release or '-' }}</code></td>
+          <td>
+            {% if vm.guest.profile_loaded %}loaded
+            {% elif r.profile_error %}<span class="warn">failed</span><div class="detail">{{ r.profile_error }}</div>
+            {% elif running %}<span class="warn">missing</span>
+            {% else %}<span class="muted">-</span>{% endif %}
+          </td>
+          <td class="num" data-role="kernel"><span class="muted">-</span></td>
+          <td>{% if scan %}<time data-role="last" data-at="{{ scan.finished_at.isoformat() }}">-</time>{% else %}<time data-role="last" class="muted">never</time>{% endif %}</td>
+          <td class="num" data-role="duration">{{ (((scan.finished_at - scan.started_at).total_seconds() * 1000) | round | int ~ ' ms') if scan else '-' }}</td>
+          <td class="num" data-role="counts">{{ scan.programs_examined ~ ' / ' ~ scan.maps_examined if scan else '-' }}</td>
+          <td class="num" data-role="findings">{{ scan.detections | length if scan else '-' }}</td>
+          <td data-role="status">
+            {% if r.error %}<span class="pill warn-pill">could not be scanned</span><div class="detail">{{ r.error }}</div>
+            {% elif not running %}<span class="muted">not scanned</span>
+            {% elif scan %}<span class="pill state-running">ok</span>
+            {% else %}<span class="muted">waiting</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="muted">A scan older than three intervals is marked <span class="stale">stale</span>.</p>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', path='/js/health.js') }}"></script>
+{% endblock %}

@@ -144,6 +144,10 @@ a:hover { text-decoration: underline; }
 .verdict[data-state="degraded"] .verdict-icon { background: rgba(210, 153, 34, 0.15); }
 .verdict[data-state="degraded"] .verdict-icon::before { content: "?"; color: var(--medium); font-weight: 700; }
 
+.pill.warn-pill { color: var(--medium); border-color: rgba(210, 153, 34, 0.5); }
+.stale { color: var(--medium); }
+.detail { margin-top: 4px; font-size: 11px; color: var(--text-muted); font-family: var(--mono); max-width: 320px; overflow-wrap: anywhere; }
+
 .scan-error { margin: 0 0 12px; font-size: 12px; color: var(--medium); font-family: var(--mono); overflow-wrap: anywhere; }
 .finding .locate { font-size: 13px; }
 table.data tr:target {
