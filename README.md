@@ -6,9 +6,11 @@ haur haur haur haur haur haur haur
 
 ### What is this johnson?
 
-This project uses KVM introspection tooling to introspect on VMs "from outside looking in". The main niceness of the project is that it is all wrapped into a neat python library where you can develop any researchware for malware analysis. 
+This project uses KVM introspection tooling to introspect on VMs "from outside looking in". With that we have easy to use functions for viewing guest registers, pmem/vmem,  attaching VM-Exit hooks, and retrieving kernel objects through our `rvprim (rootview primitives)` abstraction. With that we also wrap this all up in another python library for neat helper tools under `rvtools`.  
 
-As the subtitle suggests, one of the cool things is that we have tooling on introspecting and analyzing eBPF programs!!
+The main niceness of the project is that it is all wrapped into a neat python library (through C bindings) where you can develop any researchware for malware analysis. 
+
+Also as the subtitle suggests, one of the cool things is that we have tooling on introspecting and analyzing eBPF programs!!
 
 #### Python lib
 
