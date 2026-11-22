@@ -25,8 +25,8 @@ typedef struct {
 
 /* the init sequence, each step's failure reported as "step N (what): ...":
  *   1 pause the vm
- *   2 read MSR_LSTAR
- *   3 copy the image, found from LSTAR
+ *   2 read the kernel anchor (vmi_kernel_anchor: MSR_LSTAR, VBAR_EL1)
+ *   3 copy the image, found from the anchor
  *   4 find and decode kallsyms, with the switches the raw banner picks
  *   5 cross-check linux_banner against the raw scan and parse the release
  *   6 find and parse BTF

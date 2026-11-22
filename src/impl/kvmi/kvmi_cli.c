@@ -22,7 +22,7 @@ static int cmd_attach(int argc, char **argv) {
 
     vmi_session_t session = {0};
     char err[256];
-    if (vmi_attach(name, &session, err, sizeof(err)) != 0) {
+    if (vmi_attach(VMI_BACKEND_KVMI, name, &session, err, sizeof(err)) != 0) {
         fprintf(stderr, "error: %s\n", err);
         return 1;
     }

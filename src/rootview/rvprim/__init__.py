@@ -1,6 +1,7 @@
 from rootview.rvprim._lib import RootviewError, lib
-from rootview.rvprim.guest import Guest
+from rootview.rvprim.guest import Guest, Rootview
 from rootview.rvprim.kernel import WALK_MAX
+from rootview.rvprim.phone import Phone, inspect_phone, list_phones
 from rootview.rvprim.types import BtfType, Field, Hook, HookEvent, KernelInfo, Symbol, Task, Value, Vm, VmConfig
 from rootview.rvprim.vm import (
     console,
@@ -23,6 +24,8 @@ __all__ = [
     "Hook",
     "HookEvent",
     "KernelInfo",
+    "Phone",
+    "Rootview",
     "RootviewError",
     "Symbol",
     "Task",
@@ -32,8 +35,10 @@ __all__ = [
     "console",
     "create_vm",
     "destroy_vm",
+    "inspect_phone",
     "inspect_vm",
     "lib",
+    "list_phones",
     "list_vms",
     "restart_vm",
     "set_base",

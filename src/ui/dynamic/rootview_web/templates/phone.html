@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}RootView - {{ serial }}{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', path='/css/guest.css') }}">{% endblock %}
+
+{% block content %}
+{% if not connected %}
+<section class="panel"><p class="empty">No introspection engine is running. Start the server with <code>ROOTVIEW_BACKEND=libvmi</code>.</p></section>
+{% elif phone is none %}
+<section class="panel"><p class="error">{{ error or 'No phone ' ~ serial }}</p><p><a href="/guests">&larr; All guests</a></p></section>
+{% else %}
+
+<section class="guest-head">
+  <div>
+    <a href="/guests" class="muted">&larr; Guests</a>
+    <h1><code>{{ phone.serial }}</code> <span class="pill state-{{ 'running' if phone.connected else 'shut_off' }}">{{ 'connected' if phone.connected else phone.state }}</span></h1>
+  </div>
+  <div class="actions">
+    {% if phone.pkvmi %}<button class="btn ghost" data-action="profile">Reload profile</button>{% endif %}
+  </div>
+</section>
+
+<p class="notice" id="notice" hidden></p>
+
+<section class="panel">
+  <h2>Overview</h2>
+  <div class="overview">
+    <dl class="kv">
+      <div><dt>Model</dt><dd>{{ phone.model or '-' }}</dd></div>
+      <div><dt>Product</dt><dd>{{ phone.product or '-' }}</dd></div>
+      <div><dt>adb state</dt><dd>{{ phone.state }}</dd></div>
+      <div><dt>pkvmi</dt><dd>{{ 'ready' if phone.pkvmi else 'not found (/dev/pkvmi, /data/local/tmp/pkvmi)' }}</dd></div>
+      <div><dt>Backend</dt><dd>pkvm-vmi: the phone's own kernel, read from EL2</dd></div>
+    </dl>
+    <dl class="kv" id="kernel"><div><dt>Kernel</dt><dd class="muted">{{ 'loading… (the first profile takes ~30s)' if phone.pkvmi else 'pkvmi is not on the phone' }}</dd></div></dl>
+  </div>
+</section>
+
+{% if phone.pkvmi %}
+<section class="panel">
+  <div class="panel-head">
+    <h2>Processes <span class="muted" id="task-count"></span></h2>
+    <div class="inline">
+      <input id="task-filter" placeholder="filter by name or pid">
+      <button class="btn" data-load="tasks">Refresh</button>
+    </div>
+  </div>
+  <div class="table-scroll scroll-y">
+    <table class="data"><thead><tr><th>PID</th><th>TGID</th><th>Name</th><th>task_struct</th></tr></thead><tbody id="tasks"></tbody></table>
+  </div>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>Registers <span class="muted">EL1 / EL2</span></h2>
+    <button class="btn" data-load="registers">Refresh</button>
+  </div>
+  <div class="reg-grid" id="registers"></div>
+</section>
+
+<section class="panel">
+  <h2>Memory</h2>
+  <form class="inline-form" id="mem-form">
+    <select name="space"><option value="kernel">kernel</option><option value="virt">virtual (TTBR)</option><option value="phys">physical</option></select>
+    <input name="addr" placeholder="0xffffffc008000000 or symbol" required>
+    <input name="length" type="number" min="1" max="65536" value="256">
+    <button class="btn" type="submit">Read</button>
+    <button class="btn ghost" type="button" id="translate">Translate</button>
+  </form>
+  <p class="muted" id="mem-info"></p>
+  <pre class="hexdump" id="hexdump"></pre>
+</section>
+
+<section class="panel">
+  <h2>Symbols &amp; BTF</h2>
+  <div class="lookup-grid">
+    <form class="inline-form" id="sym-form">
+      <input name="name" placeholder="symbol, e.g. init_task" required>
+      <button class="btn" type="submit">Find symbol</button>
+    </form>
+    <form class="inline-form" id="addr-form">
+      <input name="addr" placeholder="address in the kernel image" required>
+      <button class="btn" type="submit">Name address</button>
+    </form>
+    <form class="inline-form" id="field-form">
+      <input name="type" placeholder="task_struct" required>
+      <input name="path" placeholder="se.vruntime" required>
+      <input name="addr" placeholder="struct address or symbol (optional)">
+      <button class="btn" type="submit">Resolve field</button>
+    </form>
+  </div>
+  <dl class="kv" id="lookup"></dl>
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', path='/js/guest.js') }}"></script>
+<script>RootViewGuest.initGuest({{ serial | tojson }}, {{ (phone is not none and phone.pkvmi) | tojson }});</script>
+{% endblock %}

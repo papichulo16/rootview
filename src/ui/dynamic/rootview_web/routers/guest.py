@@ -24,6 +24,13 @@ mutating = [Depends(same_origin)]
 writing = [Depends(same_origin), Depends(writes_allowed)]
 
 MEMORY_MAX = 1 << 16
+# what pkvmi dumps; a phone has no x86 register set for regs()
+PKVM_REGS = (
+    "sctlr_el1", "tcr_el1", "ttbr0_el1", "ttbr1_el1", "mair_el1", "vbar_el1",
+    "esr_el1", "elr_el1", "spsr_el1", "sp_el1", "tpidr_el1", "par_el1",
+    "hcr_el2", "sctlr_el2", "tcr_el2", "ttbr0_el2", "mair_el2", "vbar_el2",
+    "esr_el2", "elr_el2", "spsr_el2", "tpidr_el2", "vttbr_el2", "vtcr_el2",
+)
 READERS = {Space.PHYS: "read_phys", Space.VIRT: "read_virt", Space.KERNEL: "read"}
 WRITERS = {Space.PHYS: "write_phys", Space.VIRT: "write_virt"}
 
@@ -89,7 +96,12 @@ async def translate(vm_id: str, addr: Hex, engine: GuestPool = Depends(get_engin
 
 @router.get("/registers", response_model=dict[str, Hex])
 async def registers(vm_id: str, engine: GuestPool = Depends(get_engine)) -> dict[str, int]:
-    return await engine.guest(vm_id, lambda g: g.regs())
+    def read(g):
+        if getattr(g, "backend", "kvm-vmi") == "pkvm-vmi":
+            return {name: g.reg(name) for name in PKVM_REGS}
+        return g.regs()
+
+    return await engine.guest(vm_id, read)
 
 
 @router.get("/registers/{name}", response_model=Register)

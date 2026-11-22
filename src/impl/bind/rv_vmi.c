@@ -2,13 +2,6 @@
 
 #include <stdio.h>
 
-#include "vmi/vmi_reg_names.h"
-
-static int lookup(const char *name, reg_t *reg, char *err, size_t err_len) {
-    if (vmi_reg_lookup(name, reg) == 0) return 0;
-    if (err) snprintf(err, err_len, "unknown register '%s'", name);
-    return -1;
-}
 
 API int rv_pause(rv_handle_t *h, char *err, size_t err_len) {
     return vmi_pause(&h->session, err, err_len);
@@ -39,19 +32,11 @@ API int rv_translate(rv_handle_t *h, uint64_t va, uint64_t *pa, char *err, size_
 }
 
 API int rv_reg(rv_handle_t *h, const char *name, uint64_t *value, char *err, size_t err_len) {
-    reg_t reg;
-    if (lookup(name, &reg, err, err_len) != 0) return -1;
-    return vmi_read_reg(&h->session, reg, value, err, err_len);
+    return vmi_read_reg_name(&h->session, name, value, err, err_len);
 }
 
 API int rv_set_reg(rv_handle_t *h, const char *name, uint64_t value, char *err, size_t err_len) {
-    reg_t reg;
-    if (lookup(name, &reg, err, err_len) != 0) return -1;
-    if (!vmi_reg_write_supported(reg)) {
-        if (err) snprintf(err, err_len, "'%s' can't be written: only rax..r15, rip and rflags", name);
-        return -1;
-    }
-    return vmi_write_reg(&h->session, reg, value, err, err_len);
+    return vmi_write_reg_name(&h->session, name, value, err, err_len);
 }
 
 API int rv_regs(rv_handle_t *h, rv_regs_t *out, char *err, size_t err_len) {
