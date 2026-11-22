@@ -14,20 +14,15 @@ Also as the subtitle suggests, one of the cool things is that we have tooling on
 
 #### Python lib
 
-`./setup-python.sh` builds `librootview.so` and installs `rootview` into `.venv`. Then `. .venv/bin/activate`.
+Refer to the `docs/` for usage 
 
-Refer to the `docs/`
+`./setup-python.sh` builds `librootview.so` and installs `rootview` into `.venv`. Then `. .venv/bin/activate`.
 
 #### Web server
 
 Our senior design professor forced us to make a web GUI to showcase the tool.
 
 `./run-web.sh` builds the lib and serves on http://127.0.0.1:8000 (`ROOTVIEW_PORT` to change it).
-
-#### CLI Usage
-
-You will need to install an `iso` file in order to introspect into that `iso's` VM. 
- - `./rv vm [args]` - will set up your VM. Here is a default one I like: `./rv vm create test --cdrom [iso path] --display gtk`
 
 ### Init
 You need to set up bare-metal KVM-VMI, we have a VM with it all set up in `RELEASES`. But if you need to do it yourself for your machine, [just follow this guide](https://kvm-vmi.github.io/kvm-vmi/kvmi-v7/setup.html)
