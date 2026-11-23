@@ -1,0 +1,34 @@
+From 1a6b5a460e1e8faf0bc29263f6d68b5e45a171ca Mon Sep 17 00:00:00 2001
+From: Dominick Morales <dmorales2024@my.fit.edu>
+Date: Tue, 17 Nov 2026 18:01:03 +0000
+Subject: [PATCH 2/2] chardev/char-socket: don't unregister an unregistered
+ yank function
+
+A failed asynchronous client connect unregistered the channel's yank
+function, which tcp_chr_new_client() only registers on success, so any
+reconnect-ms socket aborted QEMU while its server was down.
+---
+ chardev/char-socket.c | 6 +-----
+ 1 file changed, 1 insertion(+), 5 deletions(-)
+
+diff --git a/chardev/char-socket.c b/chardev/char-socket.c
+index e064b105..67979787 100644
+--- a/chardev/char-socket.c
++++ b/chardev/char-socket.c
+@@ -1127,12 +1127,8 @@ static void qemu_chr_socket_connected(QIOTask *task, void *opaque)
+     s->connect_task = NULL;
+ 
+     if (qio_task_propagate_error(task, &err)) {
++        /* The yank function is only registered by tcp_chr_new_client(). */
+         tcp_chr_change_state(s, TCP_CHARDEV_STATE_DISCONNECTED);
+-        if (s->registered_yank) {
+-            yank_unregister_function(CHARDEV_YANK_INSTANCE(chr->label),
+-                                     char_socket_yank_iochannel,
+-                                     QIO_CHANNEL(sioc));
+-        }
+         check_report_connect_error(chr, err);
+         goto cleanup;
+     }
+-- 
+2.55.0
+

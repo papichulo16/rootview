@@ -1,0 +1,33 @@
+From 8d7e7d3dd4520e4bfe0ea1951eca4f82e5d95c29 Mon Sep 17 00:00:00 2001
+From: Dominick Morales <dmorales2024@my.fit.edu>
+Date: Tue, 17 Nov 2026 18:01:16 +0000
+Subject: [PATCH] kvm: reply to page fault events that lost their handler
+
+A memory event cleared while one of its page faults is in flight left
+the event unanswered, and KVMI keeps the vCPU waiting for the reply
+forever. Reply with the default action instead of failing.
+
+---
+ libvmi/driver/kvm/kvm_events.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/libvmi/driver/kvm/kvm_events.c b/libvmi/driver/kvm/kvm_events.c
+index 6fae94a..07c12a6 100644
+--- a/libvmi/driver/kvm/kvm_events.c
++++ b/libvmi/driver/kvm/kvm_events.c
+@@ -572,9 +572,9 @@ process_pagefault(vmi_instance_t vmi, struct kvmi_dom_event *kvmi_event)
+             return VMI_SUCCESS;
+     }
+ 
+-    errprint("%s: Caught a memory event that had no handler registered in LibVMI @ GFN 0x%" PRIx64 " (0x%" PRIx64 "), access: %u\n",
+-             __func__, gfn, (addr_t)kvmi_event->event.page_fault.gpa, out_access);
+-    return VMI_FAILURE;
++    dbprint(VMI_DEBUG_KVM, "--%s: no handler for GFN 0x%" PRIx64 " (0x%" PRIx64 "), access: %u\n",
++            __func__, gfn, (addr_t)kvmi_event->event.page_fault.gpa, out_access);
++    return process_cb_response(vmi, VMI_EVENT_RESPONSE_NONE, NULL, kvmi_event, &rpl, sizeof(rpl));
+ }
+ 
+ static status_t
+-- 
+2.55.0
+

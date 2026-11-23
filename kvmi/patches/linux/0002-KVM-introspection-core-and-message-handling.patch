@@ -1,0 +1,3144 @@
+From 9ca96f3318d0c6ea512cfbd531e79181946cad1d Mon Sep 17 00:00:00 2001
+From: Dominick Morales <dmorales2024@my.fit.edu>
+Date: Tue, 17 Nov 2026 13:00:19 -0500
+Subject: [PATCH 2/4] KVM: introspection: core and message handling
+
+Hook/unhook, the receiving thread, per-vCPU jobs and the request loop,
+VM and vCPU commands, and the gfn access table.
+
+Changes from kvmi-v7: vCPU waits use the vCPU rcuwait; the receiving
+thread borrows the VMM mm for guest memory access; access restrictions
+live in a gfn-indexed xarray instead of per-memslot bitmaps, so they
+survive memslot changes; message buffers are whitelisted for usercopy.
+
+Based on the Bitdefender KVMI patches (kvmi-v7, kvmi-v12).
+---
+ virt/kvm/Makefile.kvm             |    1 +
+ virt/kvm/introspection/kvmi.c     | 1515 +++++++++++++++++++++++++++++
+ virt/kvm/introspection/kvmi_int.h |  195 ++++
+ virt/kvm/introspection/kvmi_msg.c | 1277 ++++++++++++++++++++++++
+ virt/kvm/kvm_main.c               |   35 +
+ 5 files changed, 3023 insertions(+)
+ create mode 100644 virt/kvm/introspection/kvmi.c
+ create mode 100644 virt/kvm/introspection/kvmi_int.h
+ create mode 100644 virt/kvm/introspection/kvmi_msg.c
+
+diff --git a/virt/kvm/Makefile.kvm b/virt/kvm/Makefile.kvm
+index d047d4c..7e8c90c 100644
+--- a/virt/kvm/Makefile.kvm
++++ b/virt/kvm/Makefile.kvm
+@@ -13,3 +13,4 @@ kvm-$(CONFIG_HAVE_KVM_IRQ_ROUTING) += $(KVM)/irqchip.o
+ kvm-$(CONFIG_HAVE_KVM_DIRTY_RING) += $(KVM)/dirty_ring.o
+ kvm-$(CONFIG_HAVE_KVM_PFNCACHE) += $(KVM)/pfncache.o
+ kvm-$(CONFIG_KVM_GUEST_MEMFD) += $(KVM)/guest_memfd.o
++kvm-$(CONFIG_KVM_INTROSPECTION) += $(KVM)/introspection/kvmi.o $(KVM)/introspection/kvmi_msg.o
+diff --git a/virt/kvm/introspection/kvmi.c b/virt/kvm/introspection/kvmi.c
+new file mode 100644
+index 0000000..e6df29e
+--- /dev/null
++++ b/virt/kvm/introspection/kvmi.c
+@@ -0,0 +1,1515 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * KVM introspection
++ *
++ * Copyright (C) 2017-2020 Bitdefender S.R.L.
++ * Ported to Linux 7.3 for rootview.
++ */
++#include <linux/kthread.h>
++#include <linux/sched/mm.h>
++#include <linux/sched/signal.h>
++#include <linux/rcuwait.h>
++#include "kvmi_int.h"
++
++#define MAX_PAUSE_REQUESTS 1001
++
++static struct kmem_cache *msg_cache;
++static struct kmem_cache *job_cache;
++
++void *kvmi_msg_alloc(void)
++{
++	return kmem_cache_zalloc(msg_cache, GFP_KERNEL);
++}
++
++void *kvmi_msg_alloc_check(size_t size)
++{
++	if (size > KVMI_MSG_SIZE_ALLOC)
++		return NULL;
++	return kvmi_msg_alloc();
++}
++
++void kvmi_msg_free(void *addr)
++{
++	if (addr)
++		kmem_cache_free(msg_cache, addr);
++}
++
++static void kvmi_cache_destroy(void)
++{
++	kmem_cache_destroy(msg_cache);
++	msg_cache = NULL;
++	kmem_cache_destroy(job_cache);
++	job_cache = NULL;
++}
++
++static int kvmi_cache_create(void)
++{
++	/* Guest memory is copied in and out of these buffers. */
++	msg_cache = kmem_cache_create_usercopy("kvmi_msg", KVMI_MSG_SIZE_ALLOC,
++					       4096, SLAB_ACCOUNT, 0,
++					       KVMI_MSG_SIZE_ALLOC, NULL);
++	job_cache = kmem_cache_create("kvmi_job",
++				      sizeof(struct kvmi_job),
++				      0, SLAB_ACCOUNT, NULL);
++
++	if (!msg_cache || !job_cache) {
++		kvmi_cache_destroy();
++		return -ENOMEM;
++	}
++
++	return 0;
++}
++
++int kvmi_init(void)
++{
++	return kvmi_cache_create();
++}
++
++void kvmi_uninit(void)
++{
++	kvmi_cache_destroy();
++}
++
++static void kvmi_make_request(struct kvm_vcpu *vcpu, bool wait)
++{
++	DECLARE_BITMAP(mask, KVM_MAX_VCPUS);
++
++	if (!wait) {
++		kvm_make_request(KVM_REQ_INTROSPECTION, vcpu);
++		kvm_vcpu_kick(vcpu);
++		return;
++	}
++
++	bitmap_zero(mask, KVM_MAX_VCPUS);
++	__set_bit(vcpu->vcpu_idx, mask);
++	kvm_make_vcpus_request_mask(vcpu->kvm,
++				    KVM_REQ_INTROSPECTION | KVM_REQUEST_WAIT,
++				    mask);
++}
++
++static int __kvmi_add_job(struct kvm_vcpu *vcpu,
++			  void (*fct)(struct kvm_vcpu *vcpu, void *ctx),
++			  void *ctx, void (*free_fct)(void *ctx))
++{
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++	struct kvmi_job *job;
++
++	job = kmem_cache_zalloc(job_cache, GFP_KERNEL);
++	if (unlikely(!job))
++		return -ENOMEM;
++
++	INIT_LIST_HEAD(&job->link);
++	job->fct = fct;
++	job->ctx = ctx;
++	job->free_fct = free_fct;
++
++	spin_lock(&vcpui->job_lock);
++	list_add_tail(&job->link, &vcpui->job_list);
++	spin_unlock(&vcpui->job_lock);
++
++	return 0;
++}
++
++int kvmi_add_job(struct kvm_vcpu *vcpu,
++		 void (*fct)(struct kvm_vcpu *vcpu, void *ctx),
++		 void *ctx, void (*free_fct)(void *ctx))
++{
++	int err;
++
++	err = __kvmi_add_job(vcpu, fct, ctx, free_fct);
++	if (!err)
++		kvmi_make_request(vcpu, false);
++
++	return err;
++}
++
++static void kvmi_free_job(struct kvmi_job *job)
++{
++	if (job->free_fct)
++		job->free_fct(job->ctx);
++
++	kmem_cache_free(job_cache, job);
++}
++
++static void kvmi_create_vcpu_event(struct kvm_vcpu *vcpu)
++{
++	u32 action;
++
++	action = kvmi_msg_send_create_vcpu(vcpu);
++	if (action != KVMI_EVENT_ACTION_CONTINUE)
++		kvmi_handle_common_event_actions(vcpu->kvm, action, "CREATE");
++}
++
++static void kvmi_job_create_vcpu(struct kvm_vcpu *vcpu, void *ctx)
++{
++	if (is_vm_event_enabled(KVMI(vcpu->kvm), KVMI_EVENT_CREATE_VCPU))
++		kvmi_create_vcpu_event(vcpu);
++}
++
++static int create_vcpui(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_introspection *vcpui;
++
++	if (vcpu->kvmi)
++		return 0;
++
++	vcpui = kzalloc(sizeof(*vcpui), GFP_KERNEL_ACCOUNT);
++	if (!vcpui)
++		return -ENOMEM;
++
++	INIT_LIST_HEAD(&vcpui->job_list);
++	spin_lock_init(&vcpui->job_lock);
++
++	WRITE_ONCE(vcpu->arch.kvmi.restore, false);
++	vcpu->kvmi = vcpui;
++
++	return kvmi_add_job(vcpu, kvmi_job_create_vcpu, NULL, NULL);
++}
++
++static void free_vcpui(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_introspection *vcpui = vcpu->kvmi;
++	struct kvmi_job *cur, *next;
++
++	if (!vcpui)
++		return;
++
++	spin_lock(&vcpui->job_lock);
++	list_for_each_entry_safe(cur, next, &vcpui->job_list, link) {
++		list_del(&cur->link);
++		kvmi_free_job(cur);
++	}
++	spin_unlock(&vcpui->job_lock);
++
++	vcpu->kvmi = NULL;
++	kfree(vcpui);
++
++	kvmi_arch_vcpu_unhook(vcpu);
++	kvmi_make_request(vcpu, false);
++}
++
++static void kvmi_clear_mem_access(struct kvm_introspection *kvmi)
++{
++	unsigned long gfn;
++	void *entry;
++
++	mutex_lock(&kvmi->access_lock);
++	xa_for_each(&kvmi->access, gfn, entry) {
++		xa_erase(&kvmi->access, gfn);
++		atomic_dec(&kvmi->nr_restricted);
++		kvmi_arch_zap_gfn(kvmi->kvm, gfn);
++	}
++	mutex_unlock(&kvmi->access_lock);
++	xa_destroy(&kvmi->access);
++}
++
++static void free_kvmi(struct kvm *kvm)
++{
++	struct kvm_introspection *kvmi = KVMI(kvm);
++	struct kvm_vcpu *vcpu;
++	unsigned long i;
++
++	kvmi_clear_mem_access(kvmi);
++
++	kvm_for_each_vcpu(i, vcpu, kvm)
++		free_vcpui(vcpu);
++
++	kvm->kvmi = NULL;
++	kfree(kvmi);
++}
++
++int kvmi_vcpu_init(struct kvm_vcpu *vcpu)
++{
++	struct kvm_introspection *kvmi;
++	int r = 0;
++
++	mutex_lock(&vcpu->kvm->kvmi_lock);
++
++	kvmi = kvmi_get(vcpu->kvm);
++	if (kvmi) {
++		r = create_vcpui(vcpu);
++		kvmi_put(vcpu->kvm);
++	}
++
++	mutex_unlock(&vcpu->kvm->kvmi_lock);
++	return r;
++}
++
++void kvmi_vcpu_uninit(struct kvm_vcpu *vcpu)
++{
++	mutex_lock(&vcpu->kvm->kvmi_lock);
++	free_vcpui(vcpu);
++	mutex_unlock(&vcpu->kvm->kvmi_lock);
++}
++
++static struct kvm_introspection *
++alloc_kvmi(struct kvm *kvm, const struct kvm_introspection_hook *hook)
++{
++	struct kvm_introspection *kvmi;
++	struct kvm_vcpu *vcpu;
++	unsigned long i;
++
++	kvmi = kzalloc(sizeof(*kvmi), GFP_KERNEL_ACCOUNT);
++	if (!kvmi)
++		return NULL;
++
++	BUILD_BUG_ON(sizeof(hook->uuid) != sizeof(kvmi->uuid));
++	memcpy(&kvmi->uuid, &hook->uuid, sizeof(kvmi->uuid));
++
++	set_bit(KVMI_GET_VERSION, kvmi->cmd_allow_mask);
++	set_bit(KVMI_VM_CHECK_COMMAND, kvmi->cmd_allow_mask);
++	set_bit(KVMI_VM_CHECK_EVENT, kvmi->cmd_allow_mask);
++
++	atomic_set(&kvmi->ev_seq, 0);
++
++	xa_init(&kvmi->access);
++	mutex_init(&kvmi->access_lock);
++
++	kvmi->kvm = kvm;
++	kvm->kvmi = kvmi;
++
++	kvm_for_each_vcpu(i, vcpu, kvm) {
++		if (create_vcpui(vcpu)) {
++			free_kvmi(kvm);
++			return NULL;
++		}
++	}
++
++	return kvmi;
++}
++
++static void __kvmi_unhook(struct kvm *kvm)
++{
++	struct kvm_introspection *kvmi = KVMI(kvm);
++
++	wait_for_completion(&kvm->kvmi_complete);
++
++	kvmi_sock_put(kvmi);
++}
++
++static void kvmi_unhook(struct kvm *kvm)
++{
++	struct kvm_introspection *kvmi;
++
++	mutex_lock(&kvm->kvmi_lock);
++
++	kvmi = KVMI(kvm);
++	if (kvmi) {
++		kvmi_sock_shutdown(kvmi);
++		__kvmi_unhook(kvm);
++		free_kvmi(kvm);
++	}
++
++	mutex_unlock(&kvm->kvmi_lock);
++}
++
++int kvmi_ioctl_unhook(struct kvm *kvm)
++{
++	kvmi_unhook(kvm);
++	return 0;
++}
++
++struct kvm_introspection * __must_check kvmi_get(struct kvm *kvm)
++{
++	if (refcount_inc_not_zero(&kvm->kvmi_ref))
++		return kvm->kvmi;
++
++	return NULL;
++}
++
++void kvmi_put(struct kvm *kvm)
++{
++	if (refcount_dec_and_test(&kvm->kvmi_ref))
++		complete(&kvm->kvmi_complete);
++}
++
++/* A vCPU created while hooking may briefly lack its introspection data. */
++static struct kvm_introspection *kvmi_vcpu_get(struct kvm_vcpu *vcpu)
++{
++	struct kvm_introspection *kvmi;
++
++	if (!READ_ONCE(vcpu->kvm->kvmi))
++		return NULL;
++
++	kvmi = kvmi_get(vcpu->kvm);
++	if (kvmi && !VCPUI(vcpu)) {
++		kvmi_put(vcpu->kvm);
++		kvmi = NULL;
++	}
++
++	return kvmi;
++}
++
++static void kvmi_job_release_vcpu(struct kvm_vcpu *vcpu, void *ctx)
++{
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++
++	atomic_set(&vcpui->pause_requests, 0);
++	vcpui->waiting_for_reply = false;
++
++	if (vcpui->singlestep.loop) {
++		kvmi_arch_stop_singlestep(vcpu);
++		vcpui->singlestep.loop = false;
++	}
++}
++
++static void kvmi_release_vcpus(struct kvm *kvm)
++{
++	struct kvm_vcpu *vcpu;
++	unsigned long i;
++
++	kvm_for_each_vcpu(i, vcpu, kvm)
++		if (VCPUI(vcpu))
++			kvmi_add_job(vcpu, kvmi_job_release_vcpu, NULL, NULL);
++}
++
++static int kvmi_recv_thread(void *arg)
++{
++	struct kvm_introspection *kvmi = arg;
++	struct mm_struct *mm = kvmi->kvm->mm;
++	bool have_mm = mmget_not_zero(mm);
++
++	kvmi_info(kvmi, "Hooking VM\n");
++
++	if (have_mm) {
++		kthread_use_mm(mm);
++		while (kvmi_msg_process(kvmi))
++			;
++		kthread_unuse_mm(mm);
++		mmput(mm);
++	}
++
++	kvmi_info(kvmi, "Unhooking VM\n");
++
++	/*
++	 * Signal userspace (which might wait for POLLHUP only)
++	 * and prevent the vCPUs from sending other events.
++	 */
++	kvmi_sock_shutdown(kvmi);
++
++	kvmi_release_vcpus(kvmi->kvm);
++
++	kvmi_put(kvmi->kvm);
++	return 0;
++}
++
++static bool ready_to_hook(struct kvm *kvm)
++{
++	struct kvm_vcpu *vcpu;
++	unsigned long i;
++
++	if (kvm->kvmi)
++		return false;
++
++	kvm_for_each_vcpu(i, vcpu, kvm)
++		if (READ_ONCE(vcpu->arch.kvmi.restore))
++			return false;
++
++	return true;
++}
++
++static int kvmi_hook(struct kvm *kvm, const struct kvm_introspection_hook *hook)
++{
++	struct kvm_introspection *kvmi;
++	int err = 0;
++
++	mutex_lock(&kvm->kvmi_lock);
++
++	if (!ready_to_hook(kvm)) {
++		err = -EEXIST;
++		goto out;
++	}
++
++	kvmi = alloc_kvmi(kvm, hook);
++	if (!kvmi) {
++		err = -ENOMEM;
++		goto out;
++	}
++
++	if (!kvmi_sock_get(kvmi, hook->fd)) {
++		err = -EINVAL;
++		goto destroy;
++	}
++
++	init_completion(&kvm->kvmi_complete);
++
++	refcount_set(&kvm->kvmi_ref, 1);
++	/*
++	 * Paired with refcount_inc_not_zero() from kvmi_get().
++	 */
++	smp_wmb();
++
++	kvmi->recv = kthread_run(kvmi_recv_thread, kvmi, "kvmi-recv");
++	if (IS_ERR(kvmi->recv)) {
++		err = -ENOMEM;
++		kvmi_put(kvm);
++		goto unhook;
++	}
++
++	goto out;
++
++unhook:
++	__kvmi_unhook(kvm);
++destroy:
++	free_kvmi(kvm);
++out:
++	mutex_unlock(&kvm->kvmi_lock);
++	return err;
++}
++
++int kvmi_ioctl_hook(struct kvm *kvm, void __user *argp)
++{
++	struct kvm_introspection_hook i;
++
++	if (copy_from_user(&i, argp, sizeof(i)))
++		return -EFAULT;
++
++	if (i.padding)
++		return -EINVAL;
++
++	return kvmi_hook(kvm, &i);
++}
++
++void kvmi_create_vm(struct kvm *kvm)
++{
++	mutex_init(&kvm->kvmi_lock);
++}
++
++void kvmi_destroy_vm(struct kvm *kvm)
++{
++	kvmi_unhook(kvm);
++}
++
++static int kvmi_ioctl_get_feature(void __user *argp, bool *allow, int *id,
++				  unsigned long *bitmask, unsigned int nbits)
++{
++	struct kvm_introspection_feature feat;
++	int all_bits = -1;
++
++	if (copy_from_user(&feat, argp, sizeof(feat)))
++		return -EFAULT;
++
++	if (feat.id < 0 && feat.id != all_bits)
++		return -EINVAL;
++
++	if (feat.id >= (int)nbits)
++		return -EINVAL;
++
++	*allow = !!(feat.allow & 1);
++	*id = feat.id;
++
++	bitmap_zero(bitmask, nbits);
++	if (*id == all_bits)
++		bitmap_fill(bitmask, nbits);
++	else
++		__set_bit(*id, bitmask);
++
++	return 0;
++}
++
++static int kvmi_ioctl_feature(struct kvm *kvm,
++			      bool allow, unsigned long *requested,
++			      size_t off_dest, unsigned int nbits)
++{
++	struct kvm_introspection *kvmi;
++	unsigned long *dest;
++	int err = 0;
++
++	mutex_lock(&kvm->kvmi_lock);
++
++	kvmi = KVMI(kvm);
++	if (!kvmi) {
++		err = -EFAULT;
++		goto out;
++	}
++
++	dest = (unsigned long *)((char *)kvmi + off_dest);
++
++	if (allow)
++		bitmap_or(dest, dest, requested, nbits);
++	else
++		bitmap_andnot(dest, dest, requested, nbits);
++
++out:
++	mutex_unlock(&kvm->kvmi_lock);
++
++	return err;
++}
++
++int kvmi_ioctl_event(struct kvm *kvm, void __user *argp)
++{
++	DECLARE_BITMAP(requested, KVMI_NUM_EVENTS);
++	DECLARE_BITMAP(known, KVMI_NUM_EVENTS);
++	size_t off_bitmap;
++	bool allow;
++	int err;
++	int id;
++
++	err = kvmi_ioctl_get_feature(argp, &allow, &id, requested,
++				     KVMI_NUM_EVENTS);
++	if (err)
++		return err;
++
++	bitmap_from_u64(known, KVMI_KNOWN_EVENTS);
++	bitmap_and(requested, requested, known, KVMI_NUM_EVENTS);
++
++	off_bitmap = offsetof(struct kvm_introspection, event_allow_mask);
++
++	return kvmi_ioctl_feature(kvm, allow, requested, off_bitmap,
++				  KVMI_NUM_EVENTS);
++}
++
++int kvmi_ioctl_command(struct kvm *kvm, void __user *argp)
++{
++	DECLARE_BITMAP(requested, KVMI_NUM_COMMANDS);
++	DECLARE_BITMAP(known, KVMI_NUM_COMMANDS);
++	size_t off_bitmap;
++	bool allow;
++	int err;
++	int id;
++
++	err = kvmi_ioctl_get_feature(argp, &allow, &id, requested,
++				     KVMI_NUM_COMMANDS);
++	if (err)
++		return err;
++
++	bitmap_from_u64(known, KVMI_KNOWN_COMMANDS);
++	bitmap_and(requested, requested, known, KVMI_NUM_COMMANDS);
++
++	if (!allow) {
++		if (id == KVMI_GET_VERSION
++				|| id == KVMI_VM_CHECK_COMMAND
++				|| id == KVMI_VM_CHECK_EVENT)
++			return -EPERM;
++
++		__clear_bit(KVMI_GET_VERSION, requested);
++		__clear_bit(KVMI_VM_CHECK_COMMAND, requested);
++		__clear_bit(KVMI_VM_CHECK_EVENT, requested);
++	}
++
++	off_bitmap = offsetof(struct kvm_introspection, cmd_allow_mask);
++
++	return kvmi_ioctl_feature(kvm, allow, requested, off_bitmap,
++				  KVMI_NUM_COMMANDS);
++}
++
++int kvmi_ioctl_preunhook(struct kvm *kvm)
++{
++	struct kvm_introspection *kvmi;
++	int err = 0;
++
++	mutex_lock(&kvm->kvmi_lock);
++
++	kvmi = KVMI(kvm);
++	if (!kvmi)
++		err = -EFAULT;
++	else if (!is_vm_event_enabled(kvmi, KVMI_EVENT_UNHOOK) ||
++		 kvmi_msg_send_unhook(kvmi))
++		err = -ENOENT;
++
++	mutex_unlock(&kvm->kvmi_lock);
++
++	return err;
++}
++
++int kvmi_cmd_vm_control_events(struct kvm_introspection *kvmi,
++				unsigned int event_id, bool enable)
++{
++	if (enable)
++		set_bit(event_id, kvmi->vm_event_enable_mask);
++	else
++		clear_bit(event_id, kvmi->vm_event_enable_mask);
++
++	return 0;
++}
++
++int kvmi_cmd_vcpu_control_events(struct kvm_vcpu *vcpu,
++				 unsigned int event_id, bool enable)
++{
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++	int err;
++
++	err = kvmi_arch_cmd_control_intercept(vcpu, event_id, enable);
++	if (err)
++		return err;
++
++	if (enable)
++		set_bit(event_id, vcpui->ev_mask);
++	else
++		clear_bit(event_id, vcpui->ev_mask);
++
++	return 0;
++}
++
++/* Runs on the receiving thread, which borrows the VMM's mm. */
++int kvmi_cmd_read_physical(struct kvm *kvm, u64 gpa, u64 size,
++			   int (*send)(struct kvm_introspection *,
++					const struct kvmi_msg_hdr *,
++					int err, const void *buf, size_t),
++			   const struct kvmi_msg_hdr *ctx)
++{
++	void *buf;
++	int idx, err, ec = 0;
++
++	buf = kvmi_msg_alloc();
++	if (!buf)
++		return send(KVMI(kvm), ctx, -KVM_ENOMEM, NULL, 0);
++
++	idx = srcu_read_lock(&kvm->srcu);
++	if (kvm_read_guest(kvm, gpa, buf, size))
++		ec = -KVM_ENOENT;
++	srcu_read_unlock(&kvm->srcu, idx);
++
++	err = send(KVMI(kvm), ctx, ec, buf, ec ? 0 : size);
++
++	kvmi_msg_free(buf);
++	return err;
++}
++
++/*
++ * kvm_write_guest() expects a running vCPU for dirty-ring tracking, which
++ * the receiving thread isn't. Write through the memslot instead and only
++ * keep the dirty bitmap up to date.
++ */
++static int kvmi_write_guest_page(struct kvm *kvm, gfn_t gfn, const void *data,
++				 int offset, int len)
++{
++	struct kvm_memory_slot *slot = gfn_to_memslot(kvm, gfn);
++	unsigned long hva;
++	bool writable;
++
++	hva = gfn_to_hva_memslot_prot(slot, gfn, &writable);
++	if (kvm_is_error_hva(hva) || !writable)
++		return -EFAULT;
++
++	if (copy_to_user((void __user *)hva + offset, data, len))
++		return -EFAULT;
++
++	if (kvm_slot_dirty_track_enabled(slot) && slot->dirty_bitmap)
++		set_bit_le(gfn - slot->base_gfn, slot->dirty_bitmap);
++
++	return 0;
++}
++
++int kvmi_cmd_write_physical(struct kvm *kvm, u64 gpa, u64 size, const void *buf)
++{
++	int idx, ec = 0;
++
++	idx = srcu_read_lock(&kvm->srcu);
++	if (kvmi_write_guest_page(kvm, gpa_to_gfn(gpa), buf,
++				  offset_in_page(gpa), size))
++		ec = -KVM_ENOENT;
++	srcu_read_unlock(&kvm->srcu, idx);
++
++	return ec;
++}
++
++gfn_t kvmi_cmd_get_max_gfn(struct kvm *kvm)
++{
++	struct kvm_memory_slot *memslot;
++	struct kvm_memslots *slots;
++	gfn_t max_gfn = 0;
++	int idx, bkt;
++
++	idx = srcu_read_lock(&kvm->srcu);
++
++	slots = kvm_memslots(kvm);
++	kvm_for_each_memslot(memslot, bkt, slots)
++		if (memslot->id < KVM_USER_MEM_SLOTS &&
++		    !(memslot->flags & KVM_MEM_READONLY))
++			max_gfn = max(max_gfn, memslot->base_gfn
++						+ memslot->npages);
++
++	srcu_read_unlock(&kvm->srcu, idx);
++
++	return max_gfn;
++}
++
++static struct kvmi_job *kvmi_pull_job(struct kvm_vcpu_introspection *vcpui)
++{
++	struct kvmi_job *job = NULL;
++
++	spin_lock(&vcpui->job_lock);
++	job = list_first_entry_or_null(&vcpui->job_list, typeof(*job), link);
++	if (job)
++		list_del(&job->link);
++	spin_unlock(&vcpui->job_lock);
++
++	return job;
++}
++
++void kvmi_run_jobs(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++	struct kvmi_job *job;
++
++	while ((job = kvmi_pull_job(vcpui))) {
++		job->fct(vcpu, job->ctx);
++		kvmi_free_job(job);
++	}
++}
++
++static bool kvmi_has_jobs(struct kvm_vcpu *vcpu)
++{
++	return !list_empty_careful(&VCPUI(vcpu)->job_list);
++}
++
++/*
++ * Runs queued jobs on the vCPU thread until @done() is true. Jobs come
++ * from the receiving thread, which kicks the vCPU after queuing one.
++ */
++int kvmi_wait_vcpu(struct kvm_vcpu *vcpu, bool (*done)(struct kvm_vcpu *))
++{
++	struct rcuwait *wait = kvm_arch_vcpu_get_wait(vcpu);
++	int err = 0;
++
++	while (!done(vcpu) && !err) {
++		kvmi_run_jobs(vcpu);
++
++		err = rcuwait_wait_event(wait,
++					 done(vcpu) || kvmi_has_jobs(vcpu),
++					 TASK_KILLABLE);
++	}
++
++	return err;
++}
++
++static void kvmi_vm_shutdown(struct kvm *kvm)
++{
++	struct kvm_vcpu *vcpu;
++	unsigned long i;
++
++	kvm_for_each_vcpu(i, vcpu, kvm) {
++		read_lock(&vcpu->pid_lock);
++		if (vcpu->pid)
++			kill_pid(vcpu->pid, SIGTERM, 1);
++		read_unlock(&vcpu->pid_lock);
++	}
++}
++
++void kvmi_handle_common_event_actions(struct kvm *kvm,
++				      u32 action, const char *str)
++{
++	switch (action) {
++	case KVMI_EVENT_ACTION_CRASH:
++		kvmi_vm_shutdown(kvm);
++		break;
++
++	default:
++		kvmi_err(KVMI(kvm), "Unsupported action %d for event %s\n",
++			 action, str);
++	}
++}
++
++static void kvmi_vcpu_pause_event(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++	u32 action;
++
++	atomic_dec(&vcpui->pause_requests);
++
++	action = kvmi_msg_send_vcpu_pause(vcpu);
++	if (action != KVMI_EVENT_ACTION_CONTINUE)
++		kvmi_handle_common_event_actions(vcpu->kvm, action, "PAUSE");
++}
++
++void kvmi_send_pending_event(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++
++	if (vcpui->exception.send_event) {
++		vcpui->exception.send_event = false;
++		kvmi_arch_trap_event(vcpu);
++	}
++}
++
++static void kvmi_handle_singlestep_exit(struct kvm_vcpu *vcpu, bool success);
++
++static bool singlestep_idle(struct kvm_vcpu *vcpu)
++{
++	return !atomic_read(&KVMI(vcpu->kvm)->singlestep.active);
++}
++
++static int kvmi_wait_singlestep_insn(struct kvm_vcpu *vcpu)
++{
++	return kvmi_wait_vcpu(vcpu, singlestep_idle);
++}
++
++void kvmi_handle_requests(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_introspection *vcpui;
++	struct kvm_introspection *kvmi;
++
++	kvmi = kvmi_vcpu_get(vcpu);
++	if (!kvmi)
++		goto out;
++
++	vcpui = VCPUI(vcpu);
++
++	if (kvmi_arch_singlestep_completed(vcpu))
++		kvmi_handle_singlestep_exit(vcpu, true);
++
++	kvmi_send_pending_event(vcpu);
++
++	for (;;) {
++		if (!vcpui->singlestep.owner)
++			if (kvmi_wait_singlestep_insn(vcpu))
++				break;
++
++		kvmi_run_jobs(vcpu);
++
++		if (atomic_read(&vcpui->pause_requests))
++			kvmi_vcpu_pause_event(vcpu);
++		else
++			break;
++	}
++
++	kvmi_put(vcpu->kvm);
++
++out:
++	if (READ_ONCE(vcpu->arch.kvmi.restore) && !READ_ONCE(vcpu->kvmi))
++		kvmi_arch_restore_interception(vcpu);
++}
++
++int kvmi_cmd_vcpu_pause(struct kvm_vcpu *vcpu, bool wait)
++{
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++
++	if (atomic_read(&vcpui->pause_requests) > MAX_PAUSE_REQUESTS)
++		return -KVM_EBUSY;
++
++	atomic_inc(&vcpui->pause_requests);
++
++	kvmi_make_request(vcpu, wait);
++
++	return 0;
++}
++
++int kvmi_cmd_vcpu_set_registers(struct kvm_vcpu *vcpu,
++				const struct kvm_regs *regs)
++{
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++
++	if (!vcpui->waiting_for_reply)
++		return -KVM_EOPNOTSUPP;
++
++	memcpy(&vcpui->delayed_regs, regs, sizeof(vcpui->delayed_regs));
++	vcpui->have_delayed_regs = true;
++
++	return 0;
++}
++
++void kvmi_post_reply(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++
++	if (vcpui->have_delayed_regs) {
++		kvm_arch_vcpu_set_regs(vcpu, &vcpui->delayed_regs);
++		vcpui->have_delayed_regs = false;
++	}
++}
++
++bool kvmi_hypercall_event(struct kvm_vcpu *vcpu)
++{
++	struct kvm_introspection *kvmi;
++	bool ret = false;
++
++	if (!kvmi_arch_is_agent_hypercall(vcpu))
++		return ret;
++
++	kvmi = kvmi_vcpu_get(vcpu);
++	if (!kvmi)
++		return ret;
++
++	if (is_event_enabled(vcpu, KVMI_EVENT_HYPERCALL)) {
++		kvmi_arch_hypercall_event(vcpu);
++		ret = true;
++	}
++
++	kvmi_put(vcpu->kvm);
++
++	return ret;
++}
++
++bool kvmi_breakpoint_event(struct kvm_vcpu *vcpu, u64 gva, u8 insn_len)
++{
++	struct kvm_introspection *kvmi;
++	bool ret = false;
++
++	kvmi = kvmi_vcpu_get(vcpu);
++	if (!kvmi)
++		return true;
++
++	if (is_event_enabled(vcpu, KVMI_EVENT_BREAKPOINT))
++		kvmi_arch_breakpoint_event(vcpu, gva, insn_len);
++	else
++		ret = true;
++
++	kvmi_put(vcpu->kvm);
++
++	return ret;
++}
++EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvmi_breakpoint_event);
++
++/* Called before KVM injects events, so a queued exception goes in now. */
++void kvmi_enter_guest(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_introspection *vcpui;
++	struct kvm_introspection *kvmi;
++
++	kvmi = kvmi_vcpu_get(vcpu);
++	if (!kvmi)
++		return;
++
++	vcpui = VCPUI(vcpu);
++
++	if (vcpui->exception.pending && !vcpui->singlestep.loop &&
++	    !vcpui->singlestep.owner && kvmi_arch_queue_exception(vcpu)) {
++		vcpui->exception.pending = false;
++		vcpui->exception.send_event = true;
++		kvm_make_request(KVM_REQ_EVENT, vcpu);
++	}
++
++	kvmi_put(vcpu->kvm);
++}
++
++bool kvmi_vcpu_pending_event(struct kvm_vcpu *vcpu)
++{
++	struct kvm_introspection *kvmi;
++	bool ret;
++
++	kvmi = kvmi_vcpu_get(vcpu);
++	if (!kvmi)
++		return false;
++
++	ret = VCPUI(vcpu)->exception.send_event;
++
++	kvmi_put(vcpu->kvm);
++
++	return ret;
++}
++
++u8 kvmi_gfn_allowed_access(struct kvm *kvm, gfn_t gfn)
++{
++	struct kvm_introspection *kvmi;
++	u8 access = KVMI_FULL_ACCESS;
++	void *entry;
++
++	if (!READ_ONCE(kvm->kvmi))
++		return access;
++
++	kvmi = kvmi_get(kvm);
++	if (!kvmi)
++		return access;
++
++	if (atomic_read(&kvmi->nr_restricted)) {
++		entry = xa_load(&kvmi->access, gfn);
++		if (entry)
++			access = xa_to_value(entry);
++	}
++
++	kvmi_put(kvm);
++
++	return access;
++}
++EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvmi_gfn_allowed_access);
++
++bool kvmi_gfn_range_restricted(struct kvm *kvm, gfn_t start, gfn_t end)
++{
++	struct kvm_introspection *kvmi;
++	unsigned long index = start;
++	bool ret = false;
++
++	if (!READ_ONCE(kvm->kvmi))
++		return false;
++
++	kvmi = kvmi_get(kvm);
++	if (!kvmi)
++		return false;
++
++	if (atomic_read(&kvmi->nr_restricted))
++		ret = !!xa_find(&kvmi->access, &index, end - 1, XA_PRESENT);
++
++	kvmi_put(kvm);
++
++	return ret;
++}
++EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvmi_gfn_range_restricted);
++
++static u8 kvmi_get_gfn_access(struct kvm_introspection *kvmi, gfn_t gfn)
++{
++	void *entry = xa_load(&kvmi->access, gfn);
++
++	return entry ? xa_to_value(entry) : KVMI_FULL_ACCESS;
++}
++
++static int kvmi_set_gfn_access(struct kvm_introspection *kvmi, gfn_t gfn,
++			       u8 access)
++{
++	u8 old;
++	int err = 0;
++
++	access &= KVMI_FULL_ACCESS;
++
++	mutex_lock(&kvmi->access_lock);
++
++	old = kvmi_get_gfn_access(kvmi, gfn);
++	if (old == access)
++		goto out;
++
++	if (access == KVMI_FULL_ACCESS) {
++		xa_erase(&kvmi->access, gfn);
++		atomic_dec(&kvmi->nr_restricted);
++	} else {
++		err = xa_err(xa_store(&kvmi->access, gfn, xa_mk_value(access),
++				      GFP_KERNEL_ACCOUNT));
++		if (err)
++			goto out;
++		if (old == KVMI_FULL_ACCESS)
++			atomic_inc(&kvmi->nr_restricted);
++	}
++
++	kvmi_arch_zap_gfn(kvmi->kvm, gfn);
++
++out:
++	mutex_unlock(&kvmi->access_lock);
++	return err ? -KVM_ENOMEM : 0;
++}
++
++int kvmi_cmd_set_page_access(struct kvm_introspection *kvmi, u64 gpa,
++			     u8 access)
++{
++	return kvmi_set_gfn_access(kvmi, gpa_to_gfn(gpa), access);
++}
++
++static bool kvmi_restricted_access(struct kvm_introspection *kvmi, gpa_t gpa,
++				   u8 access)
++{
++	u8 allowed = kvmi_get_gfn_access(kvmi, gpa_to_gfn(gpa));
++
++	/*
++	 * We want to be notified only for violations involving access
++	 * bits that we've specifically cleared
++	 */
++	return !!((~allowed) & access);
++}
++
++/*
++ * The custom input is defined by a virtual address and size, and all reads
++ * must be within this space. Reads that are completely outside should be
++ * satisfyied using guest memory. Overlapping reads are erroneous.
++ */
++static int use_custom_input(struct kvm_vcpu *vcpu, gva_t gva, u8 *new,
++			    int bytes)
++{
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++	struct kvmi_custom_ro_data *c = &vcpui->custom_ro_data;
++	unsigned int offset;
++
++	if (!c->size || !bytes)
++		return 0;
++
++	if (bytes < 0 || bytes > c->size) {
++		kvmi_warn_once(KVMI(vcpu->kvm),
++			       "%s: invalid range %d max %zu\n",
++			       __func__, bytes, c->size);
++		return 0;
++	}
++
++	if (gva + bytes <= c->addr || gva >= c->addr + c->size)
++		return 0;
++
++	if (gva < c->addr || gva + bytes > c->addr + c->size) {
++		kvmi_warn_once(KVMI(vcpu->kvm),
++			       "%s: read ranges overlap: 0x%lx:%d, 0x%lx:%zu\n",
++			       __func__, gva, bytes, c->addr, c->size);
++		return 0;
++	}
++
++	offset = gva - c->addr;
++
++	memcpy(new, c->data + offset, bytes);
++
++	return bytes;
++}
++
++static bool __kvmi_track_preread(struct kvm_vcpu *vcpu, gpa_t gpa, gva_t gva,
++				 u8 *new, int bytes, bool *data_ready)
++{
++	bool ret;
++
++	if (!kvmi_restricted_access(KVMI(vcpu->kvm), gpa, KVMI_PAGE_ACCESS_R))
++		return true;
++
++	if (use_custom_input(vcpu, gva, new, bytes))
++		goto out_custom;
++
++	ret = kvmi_arch_pf_event(vcpu, gpa, gva, KVMI_PAGE_ACCESS_R);
++
++	if (ret && use_custom_input(vcpu, gva, new, bytes))
++		goto out_custom;
++
++	return ret;
++
++out_custom:
++	*data_ready = true;
++	return true;
++}
++
++bool kvmi_page_track_preread(struct kvm_vcpu *vcpu, gpa_t gpa, gva_t gva,
++			     u8 *new, int bytes, bool *data_ready)
++{
++	struct kvm_introspection *kvmi;
++	bool ret = true;
++
++	*data_ready = false;
++
++	kvmi = kvmi_vcpu_get(vcpu);
++	if (!kvmi)
++		return true;
++
++	if (is_event_enabled(vcpu, KVMI_EVENT_PF))
++		ret = __kvmi_track_preread(vcpu, gpa, gva, new, bytes,
++					   data_ready);
++
++	kvmi_put(vcpu->kvm);
++
++	return ret;
++}
++
++static bool kvmi_track_access(struct kvm_vcpu *vcpu, gpa_t gpa, gva_t gva,
++			      u8 access)
++{
++	struct kvm_introspection *kvmi;
++	bool ret = true;
++
++	kvmi = kvmi_vcpu_get(vcpu);
++	if (!kvmi)
++		return true;
++
++	if (is_event_enabled(vcpu, KVMI_EVENT_PF) &&
++	    kvmi_restricted_access(kvmi, gpa, access))
++		ret = kvmi_arch_pf_event(vcpu, gpa, gva, access);
++
++	kvmi_put(vcpu->kvm);
++
++	return ret;
++}
++
++bool kvmi_page_track_prewrite(struct kvm_vcpu *vcpu, gpa_t gpa, gva_t gva)
++{
++	return kvmi_track_access(vcpu, gpa, gva, KVMI_PAGE_ACCESS_W);
++}
++
++bool kvmi_page_track_preexec(struct kvm_vcpu *vcpu, gpa_t gpa, gva_t gva)
++{
++	return kvmi_track_access(vcpu, gpa, gva, KVMI_PAGE_ACCESS_X);
++}
++
++bool kvmi_vcpu_running_singlestep(struct kvm_vcpu *vcpu)
++{
++	struct kvm_introspection *kvmi;
++	bool ret;
++
++	kvmi = kvmi_vcpu_get(vcpu);
++	if (!kvmi)
++		return false;
++
++	ret = VCPUI(vcpu)->singlestep.loop || VCPUI(vcpu)->singlestep.owner;
++
++	kvmi_put(vcpu->kvm);
++
++	return ret;
++}
++EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvmi_vcpu_running_singlestep);
++
++static u32 kvmi_send_singlestep(struct kvm_vcpu *vcpu, bool success)
++{
++	struct kvmi_event_singlestep e;
++	int err, action;
++
++	memset(&e, 0, sizeof(e));
++	e.failed = success ? 0 : 1;
++
++	err = kvmi_send_event(vcpu, KVMI_EVENT_SINGLESTEP, &e, sizeof(e),
++			      NULL, 0, &action);
++	if (err)
++		return KVMI_EVENT_ACTION_CONTINUE;
++
++	return action;
++}
++
++static void kvmi_singlestep_event(struct kvm_vcpu *vcpu, bool success)
++{
++	u32 action;
++
++	if (!is_event_enabled(vcpu, KVMI_EVENT_SINGLESTEP))
++		return;
++
++	action = kvmi_send_singlestep(vcpu, success);
++	if (action != KVMI_EVENT_ACTION_CONTINUE)
++		kvmi_handle_common_event_actions(vcpu->kvm, action,
++						 "SINGLESTEP");
++}
++
++static void restore_original_content(struct kvm_vcpu *vcpu)
++{
++	struct kvm_introspection *kvmi = KVMI(vcpu->kvm);
++	size_t bytes = kvmi->singlestep.custom_ro_data.size;
++
++	if (!bytes)
++		return;
++
++	kvmi_arch_write_guest_virt(vcpu, VCPUI(vcpu)->custom_ro_data.addr,
++				   kvmi->singlestep.custom_ro_data.data, bytes);
++
++	kvmi->singlestep.custom_ro_data.size = 0;
++}
++
++static void kvmi_stop_singlestep_insn(struct kvm_vcpu *vcpu)
++{
++	struct kvm_introspection *kvmi = KVMI(vcpu->kvm);
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++	int l;
++
++	for (l = kvmi->singlestep.level; l--;)
++		kvmi_set_gfn_access(kvmi, kvmi->singlestep.backup[l].gfn,
++				    kvmi->singlestep.backup[l].old_access);
++
++	kvmi->singlestep.level = 0;
++
++	restore_original_content(vcpu);
++
++	atomic_set(&kvmi->singlestep.active, false);
++	/*
++	 * Make the singlestep.active update visible
++	 * before resuming all the other vCPUs.
++	 */
++	smp_mb__after_atomic();
++	kvm_make_all_cpus_request(vcpu->kvm, KVM_REQ_INTROSPECTION);
++
++	vcpui->singlestep.owner = false;
++
++	if (!vcpui->singlestep.loop)
++		kvmi_arch_stop_singlestep(vcpu);
++}
++
++/*
++ * This function is called (a) if the introspection tool has set the vCPU
++ * in single-step mode with KVMI_VCPU_CONTROL_SINGLESTEP (singlestep.loop)
++ * or (b) if the vCPU is single-stepped transparently for the introspection
++ * tool due to a unimplemented instruction (singlestep.owner).
++ */
++static void kvmi_handle_singlestep_exit(struct kvm_vcpu *vcpu, bool success)
++{
++	struct kvm_vcpu_introspection *vcpui;
++	struct kvm_introspection *kvmi;
++
++	kvmi = kvmi_vcpu_get(vcpu);
++	if (!kvmi)
++		return;
++
++	vcpui = VCPUI(vcpu);
++
++	if (vcpui->singlestep.owner)
++		kvmi_stop_singlestep_insn(vcpu);
++	if (vcpui->singlestep.loop)
++		kvmi_singlestep_event(vcpu, success);
++
++	kvmi_put(vcpu->kvm);
++}
++
++void kvmi_singlestep_done(struct kvm_vcpu *vcpu)
++{
++	kvmi_handle_singlestep_exit(vcpu, true);
++}
++EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvmi_singlestep_done);
++
++void kvmi_singlestep_failed(struct kvm_vcpu *vcpu)
++{
++	kvmi_handle_singlestep_exit(vcpu, false);
++}
++EXPORT_SYMBOL_FOR_KVM_INTERNAL(kvmi_singlestep_failed);
++
++void kvmi_init_emulate(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_introspection *vcpui;
++	struct kvm_introspection *kvmi;
++
++	kvmi = kvmi_vcpu_get(vcpu);
++	if (!kvmi)
++		return;
++
++	vcpui = VCPUI(vcpu);
++
++	vcpui->rep_complete = false;
++	vcpui->effective_rep_complete = false;
++
++	vcpui->custom_ro_data.size = 0;
++	vcpui->custom_ro_data.addr = 0;
++
++	kvmi_put(vcpu->kvm);
++}
++
++/*
++ * If the user has requested that events triggered by repetitive
++ * instructions be suppressed after the first cycle, then this
++ * function will effectively activate it. This ensures that we don't
++ * prematurely suppress potential events (second or later) triggered
++ * by an instruction during a single pass.
++ */
++void kvmi_activate_rep_complete(struct kvm_vcpu *vcpu)
++{
++	struct kvm_introspection *kvmi;
++
++	kvmi = kvmi_vcpu_get(vcpu);
++	if (!kvmi)
++		return;
++
++	VCPUI(vcpu)->effective_rep_complete = VCPUI(vcpu)->rep_complete;
++
++	kvmi_put(vcpu->kvm);
++}
++
++static bool kvmi_acquire_singlestep_insn(struct kvm_vcpu *vcpu)
++{
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++	struct kvm_introspection *kvmi = KVMI(vcpu->kvm);
++
++	if (vcpui->singlestep.owner)
++		return true;
++
++	if (atomic_cmpxchg(&kvmi->singlestep.active, false, true) != false)
++		return false;
++
++	kvm_make_all_cpus_request(vcpu->kvm,
++				  KVM_REQ_INTROSPECTION | KVM_REQUEST_WAIT);
++
++	vcpui->singlestep.owner = true;
++	kvmi->singlestep.custom_ro_data.size = 0;
++
++	return true;
++}
++
++static int write_custom_data(struct kvm_vcpu *vcpu)
++{
++	struct kvm_introspection *kvmi = KVMI(vcpu->kvm);
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++	size_t bytes = vcpui->custom_ro_data.size;
++	gva_t gva = vcpui->custom_ro_data.addr;
++
++	if (kvmi->singlestep.custom_ro_data.size || !bytes)
++		return 0;
++
++	if (kvmi_arch_read_guest_virt(vcpu, gva,
++				      kvmi->singlestep.custom_ro_data.data,
++				      bytes))
++		return -KVM_EINVAL;
++
++	if (kvmi_arch_write_guest_virt(vcpu, gva, vcpui->custom_ro_data.data,
++				       bytes))
++		return -KVM_EINVAL;
++
++	kvmi->singlestep.custom_ro_data.size = bytes;
++
++	return 0;
++}
++
++static bool kvmi_run_singlestep_insn(struct kvm_vcpu *vcpu, gpa_t gpa,
++				     u8 access)
++{
++	struct kvm_introspection *kvmi = KVMI(vcpu->kvm);
++	u8 l = kvmi->singlestep.level;
++	gfn_t gfn = gpa_to_gfn(gpa);
++	u8 old_access, new_access;
++	int err;
++
++	if (!kvmi_arch_start_singlestep(vcpu))
++		return false;
++
++	err = write_custom_data(vcpu);
++	if (err) {
++		kvmi_err(kvmi, "writing custom data failed, err %d\n", err);
++		return false;
++	}
++
++	old_access = kvmi_get_gfn_access(kvmi, gfn);
++	if (old_access == KVMI_FULL_ACCESS)
++		return true;
++
++	if (l == SINGLESTEP_MAX_DEPTH - 1) {
++		kvmi_err(kvmi, "singlestep limit reached\n");
++		return false;
++	}
++
++	kvmi->singlestep.backup[l].gfn = gfn;
++	kvmi->singlestep.backup[l].old_access = old_access;
++	kvmi->singlestep.level++;
++
++	new_access = kvmi_arch_relax_page_access(old_access, access);
++
++	kvmi_set_gfn_access(kvmi, gfn, new_access);
++
++	return true;
++}
++
++static bool kvmi_start_singlestep_insn(struct kvm_vcpu *vcpu, gpa_t gpa,
++				       u8 access)
++{
++	bool ret;
++
++	while (!kvmi_acquire_singlestep_insn(vcpu)) {
++		int err = kvmi_wait_singlestep_insn(vcpu);
++
++		if (err) {
++			kvmi_err(KVMI(vcpu->kvm), "kvmi_wait_singlestep_insn() has failed\n");
++			return false;
++		}
++	}
++
++	ret = kvmi_run_singlestep_insn(vcpu, gpa, access);
++	if (!ret)
++		kvmi_stop_singlestep_insn(vcpu);
++
++	return ret;
++}
++
++static bool __kvmi_singlestep_insn(struct kvm_vcpu *vcpu, gpa_t gpa,
++				   int *emulation_type)
++{
++	struct kvm_introspection *kvmi = KVMI(vcpu->kvm);
++	u8 access = kvmi_arch_pf_access(vcpu);
++
++	if (kvmi_arch_invalid_insn(vcpu, emulation_type))
++		return false;
++
++	if (kvmi_get_gfn_access(kvmi, gpa_to_gfn(gpa)) == KVMI_FULL_ACCESS)
++		return false;
++
++	/*
++	 * The emulator never got to the access, so report it from the fault
++	 * (SVM gives no linear address) before running the instruction.
++	 */
++	if (is_event_enabled(vcpu, KVMI_EVENT_PF) &&
++	    kvmi_restricted_access(kvmi, gpa, access) &&
++	    !kvmi_arch_pf_event(vcpu, gpa, 0, access))
++		return true;
++
++	return kvmi_start_singlestep_insn(vcpu, gpa, access);
++}
++
++bool kvmi_singlestep_insn(struct kvm_vcpu *vcpu, gpa_t gpa, int *emulation_type)
++{
++	struct kvm_introspection *kvmi;
++	bool ret;
++
++	kvmi = kvmi_vcpu_get(vcpu);
++	if (!kvmi)
++		return false;
++
++	ret = __kvmi_singlestep_insn(vcpu, gpa, emulation_type);
++
++	kvmi_put(vcpu->kvm);
++
++	return ret;
++}
+diff --git a/virt/kvm/introspection/kvmi_int.h b/virt/kvm/introspection/kvmi_int.h
+new file mode 100644
+index 0000000..c8e9363
+--- /dev/null
++++ b/virt/kvm/introspection/kvmi_int.h
+@@ -0,0 +1,195 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __KVMI_INT_H__
++#define __KVMI_INT_H__
++
++#include <linux/kvm_host.h>
++
++#define kvmi_info(kvmi, fmt, ...) \
++	kvm_info("%pU " fmt, &kvmi->uuid, ## __VA_ARGS__)
++#define kvmi_warn(kvmi, fmt, ...) \
++	kvm_info("%pU WARNING: " fmt, &kvmi->uuid, ## __VA_ARGS__)
++#define kvmi_warn_once(kvmi, fmt, ...) ({                     \
++		static bool __section(".data.once") __warned; \
++		if (!__warned) {                              \
++			__warned = true;                      \
++			kvmi_warn(kvmi, fmt, ## __VA_ARGS__); \
++		}                                             \
++	})
++#define kvmi_err(kvmi, fmt, ...) \
++	kvm_info("%pU ERROR: " fmt, &kvmi->uuid, ## __VA_ARGS__)
++
++#define KVMI_MSG_SIZE_ALLOC (sizeof(struct kvmi_msg_hdr) + KVMI_MSG_SIZE)
++
++#define KVMI_KNOWN_VM_EVENTS ( \
++			  BIT(KVMI_EVENT_CREATE_VCPU) \
++			| BIT(KVMI_EVENT_CMD_ERROR) \
++			| BIT(KVMI_EVENT_UNHOOK) \
++		)
++#define KVMI_KNOWN_VCPU_EVENTS ( \
++			  BIT(KVMI_EVENT_BREAKPOINT) \
++			| BIT(KVMI_EVENT_CMD_ERROR) \
++			| BIT(KVMI_EVENT_CR) \
++			| BIT(KVMI_EVENT_DESCRIPTOR) \
++			| BIT(KVMI_EVENT_HYPERCALL) \
++			| BIT(KVMI_EVENT_MSR) \
++			| BIT(KVMI_EVENT_TRAP) \
++			| BIT(KVMI_EVENT_PAUSE_VCPU) \
++			| BIT(KVMI_EVENT_PF) \
++			| BIT(KVMI_EVENT_SINGLESTEP) \
++			| BIT(KVMI_EVENT_XSETBV) \
++			| BIT(KVMI_EVENT_CPUID) \
++		)
++
++#define KVMI_KNOWN_EVENTS (KVMI_KNOWN_VM_EVENTS | KVMI_KNOWN_VCPU_EVENTS)
++
++#define KVMI_KNOWN_COMMANDS ( \
++			  BIT_ULL(KVMI_GET_VERSION) \
++			| BIT_ULL(KVMI_VM_CHECK_COMMAND) \
++			| BIT_ULL(KVMI_VM_CHECK_EVENT) \
++			| BIT_ULL(KVMI_VM_CONTROL_CMD_RESPONSE) \
++			| BIT_ULL(KVMI_VM_CONTROL_EVENTS) \
++			| BIT_ULL(KVMI_VM_GET_INFO) \
++			| BIT_ULL(KVMI_VM_GET_MAX_GFN) \
++			| BIT_ULL(KVMI_VM_READ_PHYSICAL) \
++			| BIT_ULL(KVMI_VM_SET_PAGE_ACCESS) \
++			| BIT_ULL(KVMI_VM_WRITE_PHYSICAL) \
++			| BIT_ULL(KVMI_VCPU_GET_INFO) \
++			| BIT_ULL(KVMI_VCPU_PAUSE) \
++			| BIT_ULL(KVMI_VCPU_CONTROL_CR) \
++			| BIT_ULL(KVMI_VCPU_CONTROL_EVENTS) \
++			| BIT_ULL(KVMI_VCPU_CONTROL_MSR) \
++			| BIT_ULL(KVMI_VCPU_CONTROL_SINGLESTEP) \
++			| BIT_ULL(KVMI_VCPU_GET_CPUID) \
++			| BIT_ULL(KVMI_VCPU_GET_MTRR_TYPE) \
++			| BIT_ULL(KVMI_VCPU_GET_REGISTERS) \
++			| BIT_ULL(KVMI_VCPU_GET_XCR) \
++			| BIT_ULL(KVMI_VCPU_GET_XSAVE) \
++			| BIT_ULL(KVMI_VCPU_INJECT_EXCEPTION) \
++			| BIT_ULL(KVMI_VCPU_SET_REGISTERS) \
++			| BIT_ULL(KVMI_VCPU_SET_XSAVE) \
++			| BIT_ULL(KVMI_VCPU_TRANSLATE_GVA) \
++		)
++
++#define KVMI_FULL_ACCESS (KVMI_PAGE_ACCESS_R | KVMI_PAGE_ACCESS_W | \
++			  KVMI_PAGE_ACCESS_X)
++
++#define KVMI(kvm) ((kvm)->kvmi)
++#define VCPUI(vcpu) ((vcpu)->kvmi)
++
++static inline bool is_vm_event_enabled(struct kvm_introspection *kvmi,
++					int event)
++{
++	return test_bit(event, kvmi->vm_event_enable_mask);
++}
++
++static inline bool is_event_enabled(struct kvm_vcpu *vcpu, int event)
++{
++	return test_bit(event, VCPUI(vcpu)->ev_mask);
++}
++
++/* kvmi_msg.c */
++bool kvmi_sock_get(struct kvm_introspection *kvmi, int fd);
++void kvmi_sock_shutdown(struct kvm_introspection *kvmi);
++void kvmi_sock_put(struct kvm_introspection *kvmi);
++bool kvmi_msg_process(struct kvm_introspection *kvmi);
++int kvmi_send_event(struct kvm_vcpu *vcpu, u32 ev_id,
++		    void *ev, size_t ev_size,
++		    void *rpl, size_t rpl_size, int *action);
++int kvmi_msg_send_unhook(struct kvm_introspection *kvmi);
++u32 kvmi_msg_send_vcpu_pause(struct kvm_vcpu *vcpu);
++u32 kvmi_msg_send_hypercall(struct kvm_vcpu *vcpu);
++u32 kvmi_msg_send_bp(struct kvm_vcpu *vcpu, u64 gpa, u8 insn_len);
++u32 kvmi_msg_send_pf(struct kvm_vcpu *vcpu, u64 gpa, u64 gva, u8 access,
++		     bool *rep_complete,
++		     u64 *ctx_addr, u8 *ctx, u32 *ctx_size);
++u32 kvmi_msg_send_create_vcpu(struct kvm_vcpu *vcpu);
++
++/* kvmi.c */
++void *kvmi_msg_alloc(void);
++void *kvmi_msg_alloc_check(size_t size);
++void kvmi_msg_free(void *addr);
++int kvmi_add_job(struct kvm_vcpu *vcpu,
++		 void (*fct)(struct kvm_vcpu *vcpu, void *ctx),
++		 void *ctx, void (*free_fct)(void *ctx));
++void kvmi_run_jobs(struct kvm_vcpu *vcpu);
++int kvmi_wait_vcpu(struct kvm_vcpu *vcpu, bool (*done)(struct kvm_vcpu *));
++void kvmi_post_reply(struct kvm_vcpu *vcpu);
++void kvmi_handle_common_event_actions(struct kvm *kvm,
++				      u32 action, const char *str);
++struct kvm_introspection * __must_check kvmi_get(struct kvm *kvm);
++void kvmi_put(struct kvm *kvm);
++void kvmi_send_pending_event(struct kvm_vcpu *vcpu);
++int kvmi_cmd_vm_control_events(struct kvm_introspection *kvmi,
++				unsigned int event_id, bool enable);
++int kvmi_cmd_vcpu_control_events(struct kvm_vcpu *vcpu,
++				 unsigned int event_id, bool enable);
++int kvmi_cmd_read_physical(struct kvm *kvm, u64 gpa, u64 size,
++			   int (*send)(struct kvm_introspection *,
++					const struct kvmi_msg_hdr*,
++					int err, const void *buf, size_t),
++			   const struct kvmi_msg_hdr *ctx);
++int kvmi_cmd_write_physical(struct kvm *kvm, u64 gpa, u64 size,
++			    const void *buf);
++gfn_t kvmi_cmd_get_max_gfn(struct kvm *kvm);
++int kvmi_cmd_vcpu_pause(struct kvm_vcpu *vcpu, bool wait);
++int kvmi_cmd_vcpu_set_registers(struct kvm_vcpu *vcpu,
++				const struct kvm_regs *regs);
++int kvmi_cmd_set_page_access(struct kvm_introspection *kvmi, u64 gpa,
++			     u8 access);
++
++/* arch */
++void kvm_arch_vcpu_set_regs(struct kvm_vcpu *vcpu, struct kvm_regs *regs);
++void kvmi_arch_vcpu_unhook(struct kvm_vcpu *vcpu);
++void kvmi_arch_restore_interception(struct kvm_vcpu *vcpu);
++int kvmi_arch_cmd_vcpu_get_info(struct kvm_vcpu *vcpu,
++				struct kvmi_vcpu_get_info_reply *rpl);
++void kvmi_arch_setup_event(struct kvm_vcpu *vcpu, struct kvmi_event *ev);
++int kvmi_arch_cmd_vcpu_get_registers(struct kvm_vcpu *vcpu,
++				const struct kvmi_msg_hdr *msg,
++				const struct kvmi_vcpu_get_registers *req,
++				struct kvmi_vcpu_get_registers_reply **dest,
++				size_t *dest_size);
++int kvmi_arch_cmd_vcpu_get_cpuid(struct kvm_vcpu *vcpu,
++				 const struct kvmi_vcpu_get_cpuid *req,
++				 struct kvmi_vcpu_get_cpuid_reply *rpl);
++bool kvmi_arch_is_agent_hypercall(struct kvm_vcpu *vcpu);
++void kvmi_arch_hypercall_event(struct kvm_vcpu *vcpu);
++void kvmi_arch_breakpoint_event(struct kvm_vcpu *vcpu, u64 gva, u8 insn_len);
++int kvmi_arch_cmd_control_intercept(struct kvm_vcpu *vcpu,
++				    unsigned int event_id, bool enable);
++int kvmi_arch_cmd_vcpu_control_cr(struct kvm_vcpu *vcpu,
++				  const struct kvmi_vcpu_control_cr *req);
++int kvmi_arch_cmd_vcpu_inject_exception(struct kvm_vcpu *vcpu, u8 vector,
++					u32 error_code, u64 address);
++void kvmi_arch_trap_event(struct kvm_vcpu *vcpu);
++bool kvmi_arch_queue_exception(struct kvm_vcpu *vcpu);
++int kvmi_arch_cmd_vcpu_get_xsave(struct kvm_vcpu *vcpu,
++				 struct kvmi_vcpu_get_xsave_reply **dest,
++				 size_t *dest_size);
++int kvmi_arch_cmd_set_xsave(struct kvm_vcpu *vcpu,
++			    const struct kvmi_vcpu_set_xsave *req,
++			    size_t req_size);
++int kvmi_arch_cmd_vcpu_get_mtrr_type(struct kvm_vcpu *vcpu, u64 gpa, u8 *type);
++int kvmi_arch_cmd_vcpu_control_msr(struct kvm_vcpu *vcpu,
++				   const struct kvmi_vcpu_control_msr *req);
++int kvmi_arch_cmd_set_page_access(struct kvm_introspection *kvmi,
++				  const struct kvmi_msg_hdr *msg,
++				  const struct kvmi_vm_set_page_access *req);
++bool kvmi_arch_pf_event(struct kvm_vcpu *vcpu, gpa_t gpa, gva_t gva,
++			u8 access);
++void kvmi_arch_features(struct kvm *kvm, struct kvmi_features *feat);
++bool kvmi_arch_start_singlestep(struct kvm_vcpu *vcpu);
++bool kvmi_arch_stop_singlestep(struct kvm_vcpu *vcpu);
++bool kvmi_arch_singlestep_completed(struct kvm_vcpu *vcpu);
++gpa_t kvmi_arch_cmd_translate_gva(struct kvm_vcpu *vcpu, gva_t gva);
++bool kvmi_arch_invalid_insn(struct kvm_vcpu *vcpu, int *emulation_type);
++u8 kvmi_arch_relax_page_access(u8 old, u8 new);
++u8 kvmi_arch_pf_access(struct kvm_vcpu *vcpu);
++void kvmi_arch_zap_gfn(struct kvm *kvm, gfn_t gfn);
++u64 kvmi_arch_cmd_get_xcr(struct kvm_vcpu *vcpu, u8 xcr);
++int kvmi_arch_read_guest_virt(struct kvm_vcpu *vcpu, gva_t gva, void *data,
++			      unsigned int bytes);
++int kvmi_arch_write_guest_virt(struct kvm_vcpu *vcpu, gva_t gva, void *data,
++			       unsigned int bytes);
++
++#endif
+diff --git a/virt/kvm/introspection/kvmi_msg.c b/virt/kvm/introspection/kvmi_msg.c
+new file mode 100644
+index 0000000..995f0b9
+--- /dev/null
++++ b/virt/kvm/introspection/kvmi_msg.c
+@@ -0,0 +1,1277 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * KVM introspection (message handling)
++ *
++ * Copyright (C) 2017-2020 Bitdefender S.R.L.
++ * Ported to Linux 7.3 for rootview.
++ *
++ */
++#include <linux/net.h>
++#include "kvmi_int.h"
++
++
++static int kvmi_msg_send_cmd_error(struct kvm_introspection *kvmi,
++				   const struct kvmi_msg_hdr *msg,
++				   int ec);
++struct kvmi_vcpu_cmd_job {
++	struct {
++		struct kvmi_msg_hdr hdr;
++		struct kvmi_vcpu_hdr cmd;
++	} *msg;
++	struct kvm_vcpu *vcpu;
++	bool cmd_reply_disabled;
++	bool cmd_reply_with_event;
++};
++
++static const char *const msg_IDs[] = {
++	[KVMI_EVENT_REPLY]             = "KVMI_EVENT_REPLY",
++	[KVMI_GET_VERSION]             = "KVMI_GET_VERSION",
++	[KVMI_VM_CHECK_COMMAND]        = "KVMI_VM_CHECK_COMMAND",
++	[KVMI_VM_CHECK_EVENT]          = "KVMI_VM_CHECK_EVENT",
++	[KVMI_VM_CONTROL_CMD_RESPONSE] = "KVMI_VM_CONTROL_CMD_RESPONSE",
++	[KVMI_VM_CONTROL_EVENTS]       = "KVMI_VM_CONTROL_EVENTS",
++	[KVMI_VM_GET_INFO]             = "KVMI_VM_GET_INFO",
++	[KVMI_VM_GET_MAX_GFN]          = "KVMI_VM_GET_MAX_GFN",
++	[KVMI_VM_READ_PHYSICAL]        = "KVMI_VM_READ_PHYSICAL",
++	[KVMI_VM_SET_PAGE_ACCESS]      = "KVMI_VM_SET_PAGE_ACCESS",
++	[KVMI_VM_WRITE_PHYSICAL]       = "KVMI_VM_WRITE_PHYSICAL",
++	[KVMI_VCPU_CONTROL_CR]         = "KVMI_VCPU_CONTROL_CR",
++	[KVMI_VCPU_CONTROL_EVENTS]     = "KVMI_VCPU_CONTROL_EVENTS",
++	[KVMI_VCPU_CONTROL_MSR]        = "KVMI_VCPU_CONTROL_MSR",
++	[KVMI_VCPU_CONTROL_SINGLESTEP] = "KVMI_VCPU_CONTROL_SINGLESTEP",
++	[KVMI_VCPU_GET_CPUID]          = "KVMI_VCPU_GET_CPUID",
++	[KVMI_VCPU_GET_INFO]           = "KVMI_VCPU_GET_INFO",
++	[KVMI_VCPU_GET_MTRR_TYPE]      = "KVMI_VCPU_GET_MTRR_TYPE",
++	[KVMI_VCPU_GET_REGISTERS]      = "KVMI_VCPU_GET_REGISTERS",
++	[KVMI_VCPU_GET_XCR]            = "KVMI_VCPU_GET_XCR",
++	[KVMI_VCPU_GET_XSAVE]          = "KVMI_VCPU_GET_XSAVE",
++	[KVMI_VCPU_INJECT_EXCEPTION]   = "KVMI_VCPU_INJECT_EXCEPTION",
++	[KVMI_VCPU_PAUSE]              = "KVMI_VCPU_PAUSE",
++	[KVMI_VCPU_SET_REGISTERS]      = "KVMI_VCPU_SET_REGISTERS",
++	[KVMI_VCPU_SET_XSAVE]          = "KVMI_VCPU_SET_XSAVE",
++	[KVMI_VCPU_TRANSLATE_GVA]      = "KVMI_VCPU_TRANSLATE_GVA",
++};
++
++static bool is_known_message(u16 id)
++{
++	return id < ARRAY_SIZE(msg_IDs) && msg_IDs[id];
++}
++
++static const char *id2str(u16 id)
++{
++	return is_known_message(id) ? msg_IDs[id] : "unknown";
++}
++
++bool kvmi_sock_get(struct kvm_introspection *kvmi, int fd)
++{
++	struct socket *sock;
++	int r;
++
++	sock = sockfd_lookup(fd, &r);
++	if (!sock)
++		return false;
++
++	kvmi->sock = sock;
++
++	return true;
++}
++
++void kvmi_sock_put(struct kvm_introspection *kvmi)
++{
++	if (kvmi->sock)
++		sockfd_put(kvmi->sock);
++}
++
++void kvmi_sock_shutdown(struct kvm_introspection *kvmi)
++{
++	kernel_sock_shutdown(kvmi->sock, SHUT_RDWR);
++}
++
++static int kvmi_sock_read(struct kvm_introspection *kvmi, void *buf,
++			  size_t size)
++{
++	struct kvec i = {
++		.iov_base = buf,
++		.iov_len = size,
++	};
++	struct msghdr m = { };
++	int rc;
++
++	rc = kernel_recvmsg(kvmi->sock, &m, &i, 1, size, MSG_WAITALL);
++
++	if (unlikely(rc != size && rc >= 0))
++		rc = -EPIPE;
++
++	return rc >= 0 ? 0 : rc;
++}
++
++static int kvmi_sock_write(struct kvm_introspection *kvmi, struct kvec *i,
++			   size_t n, size_t size)
++{
++	struct msghdr m = { };
++	int rc;
++
++	rc = kernel_sendmsg(kvmi->sock, &m, i, n, size);
++
++	if (unlikely(rc != size && rc >= 0))
++		rc = -EPIPE;
++
++	return rc >= 0 ? 0 : rc;
++}
++
++static int kvmi_msg_reply(struct kvm_introspection *kvmi,
++			  const struct kvmi_msg_hdr *msg, int err,
++			  const void *rpl, size_t rpl_size)
++{
++	struct kvmi_error_code ec;
++	struct kvmi_msg_hdr h;
++	struct kvec vec[3] = {
++		{ .iov_base = &h, .iov_len = sizeof(h) },
++		{ .iov_base = &ec, .iov_len = sizeof(ec) },
++		{ .iov_base = (void *)rpl, .iov_len = rpl_size },
++	};
++	size_t size = sizeof(h) + sizeof(ec) + (err ? 0 : rpl_size);
++	size_t n = err ? ARRAY_SIZE(vec) - 1 : ARRAY_SIZE(vec);
++
++	memset(&h, 0, sizeof(h));
++	h.id = msg->id;
++	h.seq = msg->seq;
++	h.size = size - sizeof(h);
++
++	memset(&ec, 0, sizeof(ec));
++	ec.err = err;
++
++	return kvmi_sock_write(kvmi, vec, n, size);
++}
++
++static bool kvmi_validate_no_reply(struct kvm_introspection *kvmi,
++				   const struct kvmi_msg_hdr *msg,
++				   size_t rpl_size, int err)
++{
++	if (rpl_size) {
++		kvmi_err(kvmi, "The reply to command %d cannot be discared. Closing the socket...",
++			 msg->id);
++		kvmi_sock_shutdown(kvmi);
++		return false;
++	}
++
++	if (err)
++		kvmi_err(kvmi, "Error code %d discarded for message id %d\n",
++			 err, msg->id);
++
++	return true;
++}
++
++static int kvmi_msg_vm_reply(struct kvm_introspection *kvmi,
++			     const struct kvmi_msg_hdr *msg,
++			     int err, const void *rpl,
++			     size_t rpl_size)
++{
++	if (kvmi->cmd_reply_disabled) {
++		if (!kvmi_validate_no_reply(kvmi, msg, rpl_size, err))
++			return -KVM_EINVAL;
++		if (err && kvmi->cmd_reply_with_event)
++			return kvmi_msg_send_cmd_error(kvmi, msg, err);
++		return 0;
++	}
++
++
++	return kvmi_msg_reply(kvmi, msg, err, rpl, rpl_size);
++}
++
++static int kvmi_msg_vcpu_reply(const struct kvmi_vcpu_cmd_job *job,
++				const struct kvmi_msg_hdr *msg, int err,
++				const void *rpl, size_t rpl_size)
++{
++	struct kvm_introspection *kvmi = KVMI(job->vcpu->kvm);
++
++	if (job->cmd_reply_disabled) {
++		if (!kvmi_validate_no_reply(kvmi, msg, rpl_size, err))
++			return -KVM_EINVAL;
++		if (err && job->cmd_reply_with_event)
++			return kvmi_msg_send_cmd_error(kvmi, msg, err);
++		return 0;
++	}
++
++
++	return kvmi_msg_reply(kvmi, msg, err, rpl, rpl_size);
++}
++
++static bool is_command_allowed(struct kvm_introspection *kvmi, int id)
++{
++	return test_bit(id, kvmi->cmd_allow_mask);
++}
++
++static bool invalid_vcpu_hdr(const struct kvmi_vcpu_hdr *hdr)
++{
++	return hdr->padding1 || hdr->padding2;
++}
++
++static int kvmi_get_vcpu(struct kvm_introspection *kvmi, unsigned int vcpu_idx,
++			 struct kvm_vcpu **dest)
++{
++	struct kvm *kvm = kvmi->kvm;
++	struct kvm_vcpu *vcpu;
++
++	if (vcpu_idx >= atomic_read(&kvm->online_vcpus))
++		return -KVM_EINVAL;
++
++	vcpu = kvm_get_vcpu(kvm, vcpu_idx);
++	if (!vcpu || !VCPUI(vcpu))
++		return -KVM_EINVAL;
++
++	*dest = vcpu;
++	return 0;
++}
++
++static int handle_get_version(struct kvm_introspection *kvmi,
++			      const struct kvmi_msg_hdr *msg, const void *req)
++{
++	struct kvmi_get_version_reply rpl;
++
++	memset(&rpl, 0, sizeof(rpl));
++	rpl.version = KVMI_VERSION;
++
++	kvmi_arch_features(kvmi->kvm, &rpl.features);
++
++	return kvmi_msg_vm_reply(kvmi, msg, 0, &rpl, sizeof(rpl));
++}
++
++static int handle_check_command(struct kvm_introspection *kvmi,
++				const struct kvmi_msg_hdr *msg,
++				const void *_req)
++{
++	const struct kvmi_vm_check_command *req = _req;
++	int ec = 0;
++
++	if (req->padding1 || req->padding2)
++		ec = -KVM_EINVAL;
++	else if (req->id >= KVMI_NUM_COMMANDS)
++		ec = -KVM_EINVAL;
++	else if (!is_command_allowed(kvmi, req->id))
++		ec = -KVM_EPERM;
++
++	return kvmi_msg_vm_reply(kvmi, msg, ec, NULL, 0);
++}
++
++static bool is_event_allowed(struct kvm_introspection *kvmi, int id)
++{
++	return test_bit(id, kvmi->event_allow_mask);
++}
++
++static int handle_check_event(struct kvm_introspection *kvmi,
++			      const struct kvmi_msg_hdr *msg, const void *_req)
++{
++	const struct kvmi_vm_check_event *req = _req;
++	int ec = 0;
++
++	if (req->padding1 || req->padding2)
++		ec = -KVM_EINVAL;
++	else if (req->id >= KVMI_NUM_EVENTS)
++		ec = -KVM_EINVAL;
++	else if (!is_event_allowed(kvmi, req->id))
++		ec = -KVM_EPERM;
++
++	return kvmi_msg_vm_reply(kvmi, msg, ec, NULL, 0);
++}
++
++static int handle_get_info(struct kvm_introspection *kvmi,
++			   const struct kvmi_msg_hdr *msg,
++			   const void *req)
++{
++	struct kvmi_vm_get_info_reply rpl;
++
++	memset(&rpl, 0, sizeof(rpl));
++	rpl.vcpu_count = atomic_read(&kvmi->kvm->online_vcpus);
++
++	return kvmi_msg_vm_reply(kvmi, msg, 0, &rpl, sizeof(rpl));
++}
++
++static int handle_vm_control_events(struct kvm_introspection *kvmi,
++				    const struct kvmi_msg_hdr *msg,
++				    const void *_req)
++{
++	const struct kvmi_vm_control_events *req = _req;
++	DECLARE_BITMAP(known_events, KVMI_NUM_EVENTS);
++	int ec;
++
++	bitmap_from_u64(known_events, KVMI_KNOWN_VM_EVENTS);
++
++	if (req->padding1 || req->padding2)
++		ec = -KVM_EINVAL;
++	else if (req->event_id >= KVMI_NUM_EVENTS)
++		ec = -KVM_EINVAL;
++	else if (!test_bit(req->event_id, known_events))
++		ec = -KVM_EINVAL;
++	else if (!is_event_allowed(kvmi, req->event_id))
++		ec = -KVM_EPERM;
++	else
++		ec = kvmi_cmd_vm_control_events(kvmi, req->event_id,
++						req->enable);
++
++	return kvmi_msg_vm_reply(kvmi, msg, ec, NULL, 0);
++}
++
++static bool invalid_page_access(u64 gpa, u64 size)
++{
++	u64 off = gpa & ~PAGE_MASK;
++
++	return (size == 0 || size > PAGE_SIZE || off + size > PAGE_SIZE);
++}
++
++static int handle_read_physical(struct kvm_introspection *kvmi,
++				const struct kvmi_msg_hdr *msg,
++				const void *_req)
++{
++	const struct kvmi_vm_read_physical *req = _req;
++
++	if (invalid_page_access(req->gpa, req->size)) {
++		int ec = -KVM_EINVAL;
++
++		return kvmi_msg_vm_reply(kvmi, msg, ec, NULL, 0);
++	}
++
++	return kvmi_cmd_read_physical(kvmi->kvm, req->gpa, req->size,
++				      kvmi_msg_vm_reply, msg);
++}
++
++static int handle_write_physical(struct kvm_introspection *kvmi,
++				 const struct kvmi_msg_hdr *msg,
++				 const void *_req)
++{
++	const struct kvmi_vm_write_physical *req = _req;
++	int ec;
++
++	if (msg->size < sizeof(*req) + req->size)
++		return -EINVAL;
++
++	if (invalid_page_access(req->gpa, req->size))
++		ec = -KVM_EINVAL;
++	else
++		ec = kvmi_cmd_write_physical(kvmi->kvm, req->gpa,
++					     req->size, req->data);
++
++	return kvmi_msg_vm_reply(kvmi, msg, ec, NULL, 0);
++}
++
++/*
++ * We handle this vCPU command on the receiving thread to make it easier
++ * for userspace to implement a 'pause VM' command. Usually, this is done
++ * by sending one 'pause vCPU' command for every vCPU. By handling the
++ * command here, the userspace can consider that the VM has stopped
++ * once it receives the reply for the last 'pause vCPU' command.
++ */
++static int handle_pause_vcpu(struct kvm_introspection *kvmi,
++			     const struct kvmi_msg_hdr *msg,
++			     const void *_req)
++{
++	const struct kvmi_vcpu_pause *req = _req;
++	const struct kvmi_vcpu_hdr *cmd;
++	struct kvm_vcpu *vcpu = NULL;
++	int err;
++
++	if (req->padding1 || req->padding2 || req->padding3)
++		return -KVM_EINVAL;
++
++	if (!is_event_allowed(kvmi, KVMI_EVENT_PAUSE_VCPU))
++		return -KVM_EPERM;
++
++	cmd = (const struct kvmi_vcpu_hdr *) (msg + 1);
++
++	if (invalid_vcpu_hdr(cmd)) {
++		err = -KVM_EINVAL;
++		goto reply;
++	}
++
++	err = kvmi_get_vcpu(kvmi, cmd->vcpu, &vcpu);
++	if (!err)
++		err = kvmi_cmd_vcpu_pause(vcpu, req->wait == 1);
++
++reply:
++	return kvmi_msg_vm_reply(kvmi, msg, err, NULL, 0);
++}
++
++static int handle_vm_get_max_gfn(struct kvm_introspection *kvmi,
++				 const struct kvmi_msg_hdr *msg,
++				 const void *req)
++{
++	struct kvmi_vm_get_max_gfn_reply rpl;
++
++	memset(&rpl, 0, sizeof(rpl));
++	rpl.gfn = kvmi_cmd_get_max_gfn(kvmi->kvm);
++
++	return kvmi_msg_vm_reply(kvmi, msg, 0, &rpl, sizeof(rpl));
++}
++
++static int handle_set_page_access(struct kvm_introspection *kvmi,
++				  const struct kvmi_msg_hdr *msg,
++				  const void *req)
++{
++	int ec;
++
++	ec = kvmi_arch_cmd_set_page_access(kvmi, msg, req);
++
++	return kvmi_msg_vm_reply(kvmi, msg, ec, NULL, 0);
++}
++
++static int handle_control_cmd_response(struct kvm_introspection *kvmi,
++					const struct kvmi_msg_hdr *msg,
++					const void *_req)
++{
++	const struct kvmi_vm_control_cmd_response *req = _req;
++	bool disabled, now, with_event;
++	int err;
++
++	if (req->padding1 || req->padding2)
++		return -KVM_EINVAL;
++
++	disabled = !req->enable;
++	now = (req->now == 1);
++	with_event = (disabled && req->flags & 1);
++
++	if (disabled && with_event &&
++			!is_event_allowed(kvmi, KVMI_EVENT_CMD_ERROR))
++		return -KVM_EPERM;
++
++	if (now) {
++		kvmi->cmd_reply_disabled = disabled;
++		kvmi->cmd_reply_with_event = with_event;
++	}
++
++	err = kvmi_msg_vm_reply(kvmi, msg, 0, NULL, 0);
++
++	if (!now) {
++		kvmi->cmd_reply_disabled = disabled;
++		kvmi->cmd_reply_with_event = with_event;
++	}
++
++	return err;
++}
++
++/*
++ * These commands are executed by the receiving thread/worker.
++ */
++static int(*const msg_vm[])(struct kvm_introspection *,
++			    const struct kvmi_msg_hdr *, const void *) = {
++	[KVMI_GET_VERSION]             = handle_get_version,
++	[KVMI_VM_CHECK_COMMAND]        = handle_check_command,
++	[KVMI_VM_CHECK_EVENT]          = handle_check_event,
++	[KVMI_VM_CONTROL_CMD_RESPONSE] = handle_control_cmd_response,
++	[KVMI_VM_CONTROL_EVENTS]       = handle_vm_control_events,
++	[KVMI_VM_GET_INFO]             = handle_get_info,
++	[KVMI_VM_GET_MAX_GFN]          = handle_vm_get_max_gfn,
++	[KVMI_VM_READ_PHYSICAL]        = handle_read_physical,
++	[KVMI_VM_SET_PAGE_ACCESS]      = handle_set_page_access,
++	[KVMI_VM_WRITE_PHYSICAL]       = handle_write_physical,
++	[KVMI_VCPU_PAUSE]              = handle_pause_vcpu,
++};
++
++static int handle_get_vcpu_info(const struct kvmi_vcpu_cmd_job *job,
++				const struct kvmi_msg_hdr *msg,
++				const void *req)
++{
++	struct kvmi_vcpu_get_info_reply rpl;
++
++	memset(&rpl, 0, sizeof(rpl));
++	kvmi_arch_cmd_vcpu_get_info(job->vcpu, &rpl);
++
++	return kvmi_msg_vcpu_reply(job, msg, 0, &rpl, sizeof(rpl));
++}
++
++static int handle_event_reply(const struct kvmi_vcpu_cmd_job *job,
++			      const struct kvmi_msg_hdr *msg, const void *rpl)
++{
++	struct kvm_vcpu_introspection *vcpui = VCPUI(job->vcpu);
++	struct kvm_introspection *kvmi = KVMI(job->vcpu->kvm);
++	struct kvmi_vcpu_reply *expected = &vcpui->reply;
++	const struct kvmi_event_reply *reply = rpl;
++	size_t useful, received, common;
++
++
++	if (unlikely(msg->seq != expected->seq || !vcpui->waiting_for_reply))
++		goto out_wakeup;
++
++	common = sizeof(struct kvmi_vcpu_hdr) + sizeof(*reply);
++	if (unlikely(msg->size < common))
++		goto out_wakeup;
++
++	if (unlikely(reply->padding1 || reply->padding2))
++		goto out_wakeup;
++
++	received = msg->size - common;
++	/* Don't accept newer/bigger structures */
++	if (unlikely(received > expected->size))
++		goto out_wakeup;
++
++	useful = min(received, expected->size);
++	if (useful)
++		memcpy(expected->data, reply + 1, useful);
++
++	if (useful < expected->size)
++		memset((char *)expected->data + useful, 0,
++			expected->size - useful);
++
++	expected->action = reply->action;
++	expected->error = 0;
++
++out_wakeup:
++
++	if (unlikely(expected->error))
++		kvmi_err(kvmi, "Invalid event %d/%d reply seq %x/%x size %u min %zu expected %zu padding %u,%u\n",
++			 reply->event, reply->action,
++			 msg->seq, expected->seq,
++			 msg->size, common,
++			 common + expected->size,
++			 reply->padding1,
++			 reply->padding2);
++
++	vcpui->waiting_for_reply = false;
++	return expected->error;
++}
++
++static int handle_vcpu_control_events(const struct kvmi_vcpu_cmd_job *job,
++				      const struct kvmi_msg_hdr *msg,
++				      const void *_req)
++{
++	struct kvm_introspection *kvmi = KVMI(job->vcpu->kvm);
++	const struct kvmi_vcpu_control_events *req = _req;
++	DECLARE_BITMAP(known_events, KVMI_NUM_EVENTS);
++	int ec;
++
++	bitmap_from_u64(known_events, KVMI_KNOWN_VCPU_EVENTS);
++
++	if (req->padding1 || req->padding2)
++		ec = -KVM_EINVAL;
++	else if (req->event_id >= KVMI_NUM_EVENTS)
++		ec = -KVM_EINVAL;
++	else if (!test_bit(req->event_id, known_events))
++		ec = -KVM_EINVAL;
++	else if (!is_event_allowed(kvmi, req->event_id))
++		ec = -KVM_EPERM;
++	else {
++		ec = kvmi_cmd_vcpu_control_events(job->vcpu, req->event_id,
++						  req->enable);
++		if (ec)
++			ec = -KVM_EOPNOTSUPP;
++	}
++
++	return kvmi_msg_vcpu_reply(job, msg, ec, NULL, 0);
++}
++
++static int handle_get_registers(const struct kvmi_vcpu_cmd_job *job,
++				const struct kvmi_msg_hdr *msg,
++				const void *req)
++{
++	struct kvmi_vcpu_get_registers_reply *rpl = NULL;
++	size_t rpl_size = 0;
++	int err, ec;
++
++	ec = kvmi_arch_cmd_vcpu_get_registers(job->vcpu, msg, req,
++					      &rpl, &rpl_size);
++
++	err = kvmi_msg_vcpu_reply(job, msg, ec, rpl, rpl_size);
++	kvmi_msg_free(rpl);
++	return err;
++}
++
++static int handle_set_registers(const struct kvmi_vcpu_cmd_job *job,
++				const struct kvmi_msg_hdr *msg,
++				const void *_req)
++{
++	const struct kvm_regs *regs = _req;
++	int ec;
++
++	ec = kvmi_cmd_vcpu_set_registers(job->vcpu, regs);
++
++	return kvmi_msg_vcpu_reply(job, msg, ec, NULL, 0);
++}
++
++static int handle_get_cpuid(const struct kvmi_vcpu_cmd_job *job,
++			    const struct kvmi_msg_hdr *msg,
++			    const void *req)
++{
++	struct kvmi_vcpu_get_cpuid_reply rpl;
++	int ec;
++
++	memset(&rpl, 0, sizeof(rpl));
++
++	ec = kvmi_arch_cmd_vcpu_get_cpuid(job->vcpu, req, &rpl);
++
++	return kvmi_msg_vcpu_reply(job, msg, ec, &rpl, sizeof(rpl));
++}
++
++static int handle_vcpu_control_cr(const struct kvmi_vcpu_cmd_job *job,
++				  const struct kvmi_msg_hdr *msg,
++				  const void *req)
++{
++	int ec;
++
++	ec = kvmi_arch_cmd_vcpu_control_cr(job->vcpu, req);
++
++	return kvmi_msg_vcpu_reply(job, msg, ec, NULL, 0);
++}
++
++static int handle_vcpu_inject_exception(const struct kvmi_vcpu_cmd_job *job,
++					const struct kvmi_msg_hdr *msg,
++					const void *_req)
++{
++	const struct kvmi_vcpu_inject_exception *req = _req;
++	int ec;
++
++	if (req->padding1 || req->padding2)
++		ec = -KVM_EINVAL;
++	else
++		ec = kvmi_arch_cmd_vcpu_inject_exception(job->vcpu, req->nr,
++							 req->error_code,
++							 req->address);
++
++	return kvmi_msg_vcpu_reply(job, msg, ec, NULL, 0);
++}
++
++static int handle_vcpu_get_xsave(const struct kvmi_vcpu_cmd_job *job,
++				 const struct kvmi_msg_hdr *msg,
++				 const void *req)
++{
++	struct kvmi_vcpu_get_xsave_reply *rpl = NULL;
++	size_t rpl_size = 0;
++	int err, ec;
++
++	ec = kvmi_arch_cmd_vcpu_get_xsave(job->vcpu, &rpl, &rpl_size);
++
++	err = kvmi_msg_vcpu_reply(job, msg, ec, rpl, rpl_size);
++	kvmi_msg_free(rpl);
++	return err;
++}
++
++static int handle_vcpu_set_xsave(const struct kvmi_vcpu_cmd_job *job,
++				 const struct kvmi_msg_hdr *msg,
++				 const void *req)
++{
++	size_t xsave_size = msg->size - sizeof(struct kvmi_vcpu_hdr);
++	int ec;
++
++	ec = kvmi_arch_cmd_set_xsave(job->vcpu, req, xsave_size);
++
++	return kvmi_msg_vcpu_reply(job, msg, ec, NULL, 0);
++}
++
++static int handle_vcpu_get_mtrr_type(const struct kvmi_vcpu_cmd_job *job,
++				     const struct kvmi_msg_hdr *msg,
++				     const void *_req)
++{
++	const struct kvmi_vcpu_get_mtrr_type *req = _req;
++	struct kvmi_vcpu_get_mtrr_type_reply rpl;
++	int ec;
++
++	memset(&rpl, 0, sizeof(rpl));
++
++	ec = kvmi_arch_cmd_vcpu_get_mtrr_type(job->vcpu, req->gpa, &rpl.type);
++
++	return kvmi_msg_vcpu_reply(job, msg, ec, &rpl, sizeof(rpl));
++}
++
++static int handle_vcpu_control_msr(const struct kvmi_vcpu_cmd_job *job,
++				   const struct kvmi_msg_hdr *msg,
++				   const void *req)
++{
++	int ec;
++
++	ec = kvmi_arch_cmd_vcpu_control_msr(job->vcpu, req);
++
++	return kvmi_msg_vcpu_reply(job, msg, ec, NULL, 0);
++}
++
++static int handle_vcpu_control_singlestep(const struct kvmi_vcpu_cmd_job *job,
++					  const struct kvmi_msg_hdr *msg,
++					  const void *_req)
++{
++	const struct kvmi_vcpu_control_singlestep *req = _req;
++	struct kvm_vcpu *vcpu = job->vcpu;
++	int ec = -KVM_EINVAL;
++	bool done;
++	int i;
++
++	for (i = 0; i < sizeof(req->padding); i++)
++		if (req->padding[i])
++			goto reply;
++
++	if (req->enable)
++		done = kvmi_arch_start_singlestep(vcpu);
++	else
++		done = kvmi_arch_stop_singlestep(vcpu);
++
++	if (done) {
++		ec = 0;
++		VCPUI(vcpu)->singlestep.loop = !!req->enable;
++	}
++
++reply:
++	return kvmi_msg_vcpu_reply(job, msg, ec, NULL, 0);
++}
++
++static int handle_vcpu_translate_gva(const struct kvmi_vcpu_cmd_job *job,
++				     const struct kvmi_msg_hdr *msg,
++				     const void *_req)
++{
++	const struct kvmi_vcpu_translate_gva *req = _req;
++	struct kvmi_vcpu_translate_gva_reply rpl;
++
++	memset(&rpl, 0, sizeof(rpl));
++
++	rpl.gpa = kvmi_arch_cmd_translate_gva(job->vcpu, req->gva);
++
++	return kvmi_msg_vcpu_reply(job, msg, 0, &rpl, sizeof(rpl));
++}
++
++static int handle_vcpu_get_xcr(const struct kvmi_vcpu_cmd_job *job,
++			       const struct kvmi_msg_hdr *msg,
++			       const void *_req)
++{
++	const struct kvmi_vcpu_get_xcr *req = _req;
++	struct kvmi_vcpu_get_xcr_reply rpl;
++
++	memset(&rpl, 0, sizeof(rpl));
++
++	if (req->xcr != 0)
++		return kvmi_msg_vcpu_reply(job, msg, -KVM_EINVAL, NULL, 0);
++
++	rpl.value = kvmi_arch_cmd_get_xcr(job->vcpu, req->xcr);
++
++	return kvmi_msg_vcpu_reply(job, msg, 0, &rpl, sizeof(rpl));
++}
++
++/*
++ * These commands are executed on the vCPU thread. The receiving thread
++ * passes the messages using a newly allocated 'struct kvmi_vcpu_cmd_job'
++ * and signals the vCPU to handle the command (which includes
++ * sending back the reply).
++ */
++static int(*const msg_vcpu[])(const struct kvmi_vcpu_cmd_job *,
++			      const struct kvmi_msg_hdr *, const void *) = {
++	[KVMI_EVENT_REPLY]             = handle_event_reply,
++	[KVMI_VCPU_CONTROL_CR]         = handle_vcpu_control_cr,
++	[KVMI_VCPU_CONTROL_EVENTS]     = handle_vcpu_control_events,
++	[KVMI_VCPU_CONTROL_MSR]        = handle_vcpu_control_msr,
++	[KVMI_VCPU_CONTROL_SINGLESTEP] = handle_vcpu_control_singlestep,
++	[KVMI_VCPU_GET_CPUID]          = handle_get_cpuid,
++	[KVMI_VCPU_GET_INFO]           = handle_get_vcpu_info,
++	[KVMI_VCPU_GET_MTRR_TYPE]      = handle_vcpu_get_mtrr_type,
++	[KVMI_VCPU_GET_REGISTERS]      = handle_get_registers,
++	[KVMI_VCPU_GET_XCR]            = handle_vcpu_get_xcr,
++	[KVMI_VCPU_GET_XSAVE]          = handle_vcpu_get_xsave,
++	[KVMI_VCPU_INJECT_EXCEPTION]   = handle_vcpu_inject_exception,
++	[KVMI_VCPU_SET_REGISTERS]      = handle_set_registers,
++	[KVMI_VCPU_SET_XSAVE]          = handle_vcpu_set_xsave,
++	[KVMI_VCPU_TRANSLATE_GVA]      = handle_vcpu_translate_gva,
++};
++
++static void kvmi_job_vcpu_cmd(struct kvm_vcpu *vcpu, void *ctx)
++{
++	struct kvmi_vcpu_cmd_job *job = ctx;
++	size_t id = job->msg->hdr.id;
++	int err;
++
++	job->vcpu = vcpu;
++
++	err = msg_vcpu[id](job, &job->msg->hdr, job->msg + 1);
++
++	if (err) {
++		struct kvm_introspection *kvmi = KVMI(vcpu->kvm);
++
++		kvmi_err(kvmi,
++			 "%s: cmd id: %zu (%s), err: %d\n", __func__,
++			 id, id2str(id), err);
++		kvmi_sock_shutdown(kvmi);
++	}
++}
++
++static void kvmi_free_ctx(void *_ctx)
++{
++	const struct kvmi_vcpu_cmd_job *ctx = _ctx;
++
++	kvmi_msg_free(ctx->msg);
++	kfree(ctx);
++}
++
++static int kvmi_msg_queue_to_vcpu(struct kvm_vcpu *vcpu,
++				  const struct kvmi_vcpu_cmd_job *cmd)
++{
++	return kvmi_add_job(vcpu, kvmi_job_vcpu_cmd, (void *)cmd,
++			    kvmi_free_ctx);
++}
++
++static bool is_vm_message(u16 id)
++{
++	return id < ARRAY_SIZE(msg_vm) && !!msg_vm[id];
++}
++
++static bool is_vcpu_message(u16 id)
++{
++	return id < ARRAY_SIZE(msg_vcpu) && !!msg_vcpu[id];
++}
++
++static bool is_unsupported_message(u16 id)
++{
++	bool supported;
++
++	supported = is_known_message(id) &&
++			(is_vm_message(id) || is_vcpu_message(id));
++
++	return !supported;
++}
++
++static int kvmi_consume_bytes(struct kvm_introspection *kvmi, size_t bytes)
++{
++	size_t to_read;
++	u8 buf[512];
++	int err = 0;
++
++	while (bytes && !err) {
++		to_read = min(bytes, sizeof(buf));
++
++		err = kvmi_sock_read(kvmi, buf, to_read);
++
++		bytes -= to_read;
++	}
++
++	return err;
++}
++
++static struct kvmi_msg_hdr *
++kvmi_msg_recv(struct kvm_introspection *kvmi, bool *unsupported)
++{
++	struct kvmi_msg_hdr *msg;
++	int err;
++
++	*unsupported = false;
++
++	msg = kvmi_msg_alloc();
++	if (!msg)
++		goto out_err;
++
++	err = kvmi_sock_read(kvmi, msg, sizeof(*msg));
++	if (err)
++		goto out_err;
++
++	if (msg->size > KVMI_MSG_SIZE)
++		goto out_err_msg;
++
++	if (is_unsupported_message(msg->id)) {
++		if (msg->size && kvmi_consume_bytes(kvmi, msg->size) < 0)
++			goto out_err_msg;
++
++		*unsupported = true;
++		return msg;
++	}
++
++	if (msg->size && kvmi_sock_read(kvmi, msg + 1, msg->size) < 0)
++		goto out_err_msg;
++
++	return msg;
++
++out_err_msg:
++	kvmi_err(kvmi, "%s id %u (%s) size %u\n",
++		 __func__, msg->id, id2str(msg->id), msg->size);
++
++out_err:
++	kvmi_msg_free(msg);
++
++	return NULL;
++}
++
++static int kvmi_msg_dispatch_vm_cmd(struct kvm_introspection *kvmi,
++				    const struct kvmi_msg_hdr *msg)
++{
++
++	return msg_vm[msg->id](kvmi, msg, msg + 1);
++}
++
++static bool vcpu_can_handle_commands(struct kvm_vcpu *vcpu)
++{
++	return VCPUI(vcpu)->waiting_for_reply
++		|| vcpu->arch.mp_state != KVM_MP_STATE_UNINITIALIZED;
++}
++
++static int kvmi_get_vcpu_if_ready(struct kvm_introspection *kvmi,
++				  unsigned int vcpu_idx,
++				  struct kvm_vcpu **vcpu)
++{
++	int err;
++
++	err = kvmi_get_vcpu(kvmi, vcpu_idx, vcpu);
++
++	if (!err && !vcpu_can_handle_commands(*vcpu))
++		err = -KVM_EAGAIN;
++
++	return err;
++}
++
++static int kvmi_msg_dispatch_vcpu_job(struct kvm_introspection *kvmi,
++				      struct kvmi_vcpu_cmd_job *job,
++				      bool *queued)
++{
++	struct kvmi_vcpu_hdr *cmd = &job->msg->cmd;
++	struct kvmi_msg_hdr *hdr = &job->msg->hdr;
++	struct kvm_vcpu *vcpu = NULL;
++	int err;
++
++
++	if (invalid_vcpu_hdr(cmd))
++		return -KVM_EINVAL;
++
++	err = kvmi_get_vcpu_if_ready(kvmi, cmd->vcpu, &vcpu);
++
++	if (err)
++		return kvmi_msg_vm_reply(kvmi, hdr, err, NULL, 0);
++
++	err = kvmi_msg_queue_to_vcpu(vcpu, job);
++	if (!err)
++		*queued = true;
++	return err;
++}
++
++static int kvmi_msg_dispatch_vcpu_cmd(struct kvm_introspection *kvmi,
++				      struct kvmi_msg_hdr *msg,
++				      bool *queued)
++{
++	struct kvmi_vcpu_cmd_job *job_cmd;
++	int err;
++
++	job_cmd = kzalloc(sizeof(*job_cmd), GFP_KERNEL);
++	if (!job_cmd)
++		return -KVM_ENOMEM;
++
++	job_cmd->cmd_reply_disabled = kvmi->cmd_reply_disabled;
++	job_cmd->cmd_reply_with_event = kvmi->cmd_reply_with_event;
++
++	job_cmd->msg = (void *)msg;
++
++	err = kvmi_msg_dispatch_vcpu_job(kvmi, job_cmd, queued);
++
++	if (!*queued)
++		kfree(job_cmd);
++
++	return err;
++}
++
++static int kvmi_msg_dispatch(struct kvm_introspection *kvmi,
++			     struct kvmi_msg_hdr *msg, bool *queued)
++{
++	int err;
++
++	if (is_vcpu_message(msg->id))
++		err = kvmi_msg_dispatch_vcpu_cmd(kvmi, msg, queued);
++	else
++		err = kvmi_msg_dispatch_vm_cmd(kvmi, msg);
++
++	if (err)
++		kvmi_err(kvmi, "%s: msg id: %u (%s), err: %d\n", __func__,
++			 msg->id, id2str(msg->id), err);
++
++	return err;
++}
++
++static bool is_message_allowed(struct kvm_introspection *kvmi, __u16 id)
++{
++	if (id == KVMI_EVENT_REPLY)
++		return true;
++
++	if (id >= KVMI_NUM_COMMANDS)
++		return false;
++
++	return is_command_allowed(kvmi, id);
++}
++
++static int kvmi_msg_vm_reply_ec(struct kvm_introspection *kvmi,
++				const struct kvmi_msg_hdr *msg, int ec)
++{
++	if (kvmi->cmd_reply_disabled)
++		return ec;
++
++	return kvmi_msg_vm_reply(kvmi, msg, ec, NULL, 0);
++}
++
++bool kvmi_msg_process(struct kvm_introspection *kvmi)
++{
++	struct kvmi_msg_hdr *msg;
++	bool queued = false;
++	bool unsupported;
++	int err = -1;
++
++	msg = kvmi_msg_recv(kvmi, &unsupported);
++	if (!msg)
++		goto out;
++
++	if (unsupported) {
++		err = kvmi_msg_vm_reply_ec(kvmi, msg, -KVM_ENOSYS);
++		goto out;
++	}
++
++	if (!is_message_allowed(kvmi, msg->id)) {
++		err = kvmi_msg_vm_reply_ec(kvmi, msg, -KVM_EPERM);
++		goto out;
++	}
++
++	err = kvmi_msg_dispatch(kvmi, msg, &queued);
++
++out:
++	if (!queued)
++		kvmi_msg_free(msg);
++
++	return err == 0;
++}
++
++static inline u32 new_seq(struct kvm_introspection *kvmi)
++{
++	return atomic_inc_return(&kvmi->ev_seq);
++}
++
++static void kvmi_setup_event_common(struct kvmi_event *ev, u32 ev_id,
++				    unsigned short vcpu_idx)
++{
++	memset(ev, 0, sizeof(*ev));
++
++	ev->vcpu = vcpu_idx;
++	ev->event = ev_id;
++	ev->size = sizeof(*ev);
++}
++
++static void kvmi_setup_event(struct kvm_vcpu *vcpu, struct kvmi_event *ev,
++			     u32 ev_id)
++{
++	kvmi_setup_event_common(ev, ev_id, vcpu->vcpu_idx);
++	kvmi_arch_setup_event(vcpu, ev);
++}
++
++int kvmi_msg_send_unhook(struct kvm_introspection *kvmi)
++{
++	struct kvmi_msg_hdr hdr;
++	struct kvmi_event common;
++	struct kvec vec[] = {
++		{.iov_base = &hdr,	.iov_len = sizeof(hdr)	 },
++		{.iov_base = &common,	.iov_len = sizeof(common)},
++	};
++	size_t msg_size = sizeof(hdr) + sizeof(common);
++	size_t n = ARRAY_SIZE(vec);
++
++	memset(&hdr, 0, sizeof(hdr));
++	hdr.id = KVMI_EVENT;
++	hdr.seq = new_seq(kvmi);
++	hdr.size = msg_size - sizeof(hdr);
++
++	kvmi_setup_event_common(&common, KVMI_EVENT_UNHOOK, 0);
++
++
++	return kvmi_sock_write(kvmi, vec, n, msg_size);
++}
++
++static bool reply_received(struct kvm_vcpu *vcpu)
++{
++	return !VCPUI(vcpu)->waiting_for_reply;
++}
++
++static int kvmi_wait_for_reply(struct kvm_vcpu *vcpu)
++{
++	VCPUI(vcpu)->waiting_for_reply = true;
++
++	return kvmi_wait_vcpu(vcpu, reply_received);
++}
++
++static int __kvmi_send_event(struct kvm_vcpu *vcpu, u32 ev_id,
++		      void *ev, size_t ev_size,
++		      void *rpl, size_t rpl_size, int *action)
++{
++	struct kvmi_msg_hdr hdr;
++	struct kvmi_event common;
++	struct kvec vec[] = {
++		{.iov_base = &hdr,	.iov_len = sizeof(hdr)	 },
++		{.iov_base = &common,	.iov_len = sizeof(common)},
++		{.iov_base = ev,	.iov_len = ev_size	 },
++	};
++	size_t msg_size = sizeof(hdr) + sizeof(common) + ev_size;
++	size_t n = ev_size ? ARRAY_SIZE(vec) : ARRAY_SIZE(vec)-1;
++	struct kvm_vcpu_introspection *vcpui = VCPUI(vcpu);
++	struct kvm_introspection *kvmi = KVMI(vcpu->kvm);
++	int err;
++
++	memset(&hdr, 0, sizeof(hdr));
++	hdr.id = KVMI_EVENT;
++	hdr.seq = new_seq(kvmi);
++	hdr.size = msg_size - sizeof(hdr);
++
++	kvmi_setup_event(vcpu, &common, ev_id);
++
++	memset(&vcpui->reply, 0, sizeof(vcpui->reply));
++
++	vcpui->reply.seq = hdr.seq;
++	vcpui->reply.data = rpl;
++	vcpui->reply.size = rpl_size;
++	vcpui->reply.error = -EINTR;
++
++
++	err = kvmi_sock_write(kvmi, vec, n, msg_size);
++	if (err)
++		goto out;
++
++	err = kvmi_wait_for_reply(vcpu);
++	if (err)
++		goto out;
++
++	err = vcpui->reply.error;
++	if (err)
++		goto out;
++
++	kvmi_post_reply(vcpu);
++	*action = vcpui->reply.action;
++
++out:
++	vcpui->waiting_for_reply = false;
++
++	if (err)
++		kvmi_sock_shutdown(kvmi);
++	return err;
++}
++
++int kvmi_send_event(struct kvm_vcpu *vcpu, u32 ev_id,
++		    void *ev, size_t ev_size,
++		    void *rpl, size_t rpl_size, int *action)
++{
++	kvmi_send_pending_event(vcpu);
++
++	return __kvmi_send_event(vcpu, ev_id, ev, ev_size,
++				 rpl, rpl_size, action);
++}
++
++u32 kvmi_msg_send_vcpu_pause(struct kvm_vcpu *vcpu)
++{
++	int err, action;
++
++	err = kvmi_send_event(vcpu, KVMI_EVENT_PAUSE_VCPU, NULL, 0,
++			      NULL, 0, &action);
++	if (err)
++		return KVMI_EVENT_ACTION_CONTINUE;
++
++	return action;
++}
++
++u32 kvmi_msg_send_hypercall(struct kvm_vcpu *vcpu)
++{
++	int err, action;
++
++	err = kvmi_send_event(vcpu, KVMI_EVENT_HYPERCALL, NULL, 0,
++			      NULL, 0, &action);
++	if (err)
++		return KVMI_EVENT_ACTION_CONTINUE;
++
++	return action;
++}
++
++u32 kvmi_msg_send_bp(struct kvm_vcpu *vcpu, u64 gpa, u8 insn_len)
++{
++	struct kvmi_event_breakpoint e;
++	int err, action;
++
++	memset(&e, 0, sizeof(e));
++	e.gpa = gpa;
++	e.insn_len = insn_len;
++
++	err = kvmi_send_event(vcpu, KVMI_EVENT_BREAKPOINT, &e, sizeof(e),
++			      NULL, 0, &action);
++	if (err)
++		return KVMI_EVENT_ACTION_CONTINUE;
++
++	return action;
++}
++
++u32 kvmi_msg_send_pf(struct kvm_vcpu *vcpu, u64 gpa, u64 gva, u8 access,
++		     bool *rep_complete,
++		     u64 *ctx_addr, u8 *ctx_data, u32 *ctx_size)
++{
++	u32 max_ctx_size = *ctx_size;
++	struct kvmi_event_pf_reply r;
++	struct kvmi_event_pf e;
++	int err, action;
++
++	memset(&e, 0, sizeof(e));
++	e.gpa = gpa;
++	e.gva = gva;
++	e.access = access;
++
++	*rep_complete = false;
++	*ctx_size = 0;
++
++	err = kvmi_send_event(vcpu, KVMI_EVENT_PF, &e, sizeof(e),
++			      &r, sizeof(r), &action);
++	if (err)
++		return KVMI_EVENT_ACTION_CONTINUE;
++
++	if (r.padding1 || r.padding2) {
++		struct kvm_introspection *kvmi = KVMI(vcpu->kvm);
++
++		kvmi_err(kvmi, "%s: non zero padding %u,%u\n",
++			__func__, r.padding1, r.padding2);
++		kvmi_sock_shutdown(kvmi);
++		return KVMI_EVENT_ACTION_CONTINUE;
++	}
++
++	if (r.ctx_size > max_ctx_size) {
++		struct kvm_introspection *kvmi = KVMI(vcpu->kvm);
++
++		kvmi_err(kvmi, "%s: ctx_size (recv:%u max:%u)\n",
++				__func__, r.ctx_size, max_ctx_size);
++		kvmi_sock_shutdown(kvmi);
++		return KVMI_EVENT_ACTION_CONTINUE;
++	}
++
++	*rep_complete = r.rep_complete == 1;
++
++	*ctx_size = min_t(u32, r.ctx_size, sizeof(r.ctx_data));
++	*ctx_addr = r.ctx_addr;
++	if (*ctx_size)
++		memcpy(ctx_data, r.ctx_data, *ctx_size);
++
++	return action;
++}
++
++u32 kvmi_msg_send_create_vcpu(struct kvm_vcpu *vcpu)
++{
++	int err, action;
++
++	err = kvmi_send_event(vcpu, KVMI_EVENT_CREATE_VCPU, NULL, 0,
++			      NULL, 0, &action);
++	if (err)
++		return KVMI_EVENT_ACTION_CONTINUE;
++
++	return action;
++}
++
++static int kvmi_msg_send_cmd_error(struct kvm_introspection *kvmi,
++				   const struct kvmi_msg_hdr *msg,
++				   int ec)
++{
++	struct kvmi_msg_hdr hdr;
++	struct {
++		struct kvmi_event common;
++		struct kvmi_event_cmd_error cmd_error;
++	} ev;
++	struct kvec vec[] = {
++		{.iov_base = &hdr, .iov_len = sizeof(hdr)},
++		{.iov_base = &ev,  .iov_len = sizeof(ev) },
++	};
++	size_t msg_size = sizeof(hdr) + sizeof(ev);
++	size_t n = ARRAY_SIZE(vec);
++
++	memset(&hdr, 0, sizeof(hdr));
++	hdr.id = KVMI_EVENT;
++	hdr.seq = new_seq(kvmi);
++	hdr.size = msg_size - sizeof(hdr);
++
++	memset(&ev, 0, sizeof(ev));
++	kvmi_setup_event_common(&ev.common, KVMI_EVENT_CMD_ERROR, 0);
++	ev.cmd_error.msg_id = msg->id;
++	ev.cmd_error.msg_seq = msg->seq;
++	ev.cmd_error.err = ec;
++
++
++	return kvmi_sock_write(kvmi, vec, n, msg_size);
++}
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index 5a78284..b38f4bc 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -78,6 +78,11 @@ MODULE_LICENSE("GPL");
+ /* Architectures should define their poll value according to the halt latency */
+ unsigned int __read_mostly halt_poll_ns = KVM_HALT_POLL_NS_DEFAULT;
+ module_param(halt_poll_ns, uint, 0644);
++
++#ifdef CONFIG_KVM_INTROSPECTION
++static bool enable_introspection = true;
++module_param_named(introspection, enable_introspection, bool, 0644);
++#endif
+ EXPORT_SYMBOL_FOR_KVM_INTERNAL(halt_poll_ns);
+ 
+ /* Default doubles per-vcpu halt_poll_ns. */
+@@ -466,6 +471,7 @@ static void kvm_vcpu_init(struct kvm_vcpu *vcpu, struct kvm *kvm, unsigned id)
+ 
+ static void kvm_vcpu_destroy(struct kvm_vcpu *vcpu)
+ {
++	kvmi_vcpu_uninit(vcpu);
+ 	kvm_arch_vcpu_destroy(vcpu);
+ 	kvm_dirty_ring_free(&vcpu->dirty_ring);
+ 
+@@ -1106,6 +1112,7 @@ static struct kvm *kvm_create_vm(unsigned long type, const char *fdname)
+ 		return ERR_PTR(-ENOMEM);
+ 
+ 	KVM_MMU_LOCK_INIT(kvm);
++	kvmi_create_vm(kvm);
+ 	mmgrab(current->mm);
+ 	kvm->mm = current->mm;
+ 	kvm_eventfd_init(kvm);
+@@ -1257,6 +1264,7 @@ static void kvm_destroy_vm(struct kvm *kvm)
+ 	int i;
+ 	struct mm_struct *mm = kvm->mm;
+ 
++	kvmi_destroy_vm(kvm);
+ 	kvm_destroy_pm_notifier(kvm);
+ 	kvm_uevent_notify_change(KVM_EVENT_DESTROY_VM, kvm);
+ 	kvm_destroy_vm_debugfs(kvm);
+@@ -3661,6 +3669,10 @@ static int kvm_vcpu_check_block(struct kvm_vcpu *vcpu)
+ 		goto out;
+ 	if (kvm_check_request(KVM_REQ_UNBLOCK, vcpu))
+ 		goto out;
++#ifdef CONFIG_KVM_INTROSPECTION
++	if (kvm_test_request(KVM_REQ_INTROSPECTION, vcpu))
++		goto out;
++#endif
+ 
+ 	ret = 0;
+ out:
+@@ -4276,6 +4288,7 @@ static int kvm_vm_ioctl_create_vcpu(struct kvm *kvm, unsigned long id)
+ 	atomic_inc(&kvm->online_vcpus);
+ 	mutex_unlock(&vcpu->mutex);
+ 
++	kvmi_vcpu_init(vcpu);
+ 	kvm_arch_vcpu_postcreate(vcpu);
+ 	kvm_create_vcpu_debugfs(vcpu);
+ 	return r;
+@@ -5184,6 +5197,25 @@ static long kvm_vm_ioctl(struct file *filp,
+ 	if (kvm->mm != current->mm || kvm->vm_dead)
+ 		return -EIO;
+ 	switch (ioctl) {
++#ifdef CONFIG_KVM_INTROSPECTION
++	case KVM_INTROSPECTION_HOOK:
++		r = -EPERM;
++		if (enable_introspection)
++			r = kvmi_ioctl_hook(kvm, argp);
++		break;
++	case KVM_INTROSPECTION_UNHOOK:
++		r = kvmi_ioctl_unhook(kvm);
++		break;
++	case KVM_INTROSPECTION_COMMAND:
++		r = kvmi_ioctl_command(kvm, argp);
++		break;
++	case KVM_INTROSPECTION_EVENT:
++		r = kvmi_ioctl_event(kvm, argp);
++		break;
++	case KVM_INTROSPECTION_PREUNHOOK:
++		r = kvmi_ioctl_preunhook(kvm);
++		break;
++#endif
+ 	case KVM_CREATE_VCPU:
+ 		r = kvm_vm_ioctl_create_vcpu(kvm, arg);
+ 		break;
+@@ -6541,6 +6573,8 @@ int kvm_init(unsigned vcpu_size, unsigned vcpu_align, struct module *module)
+ 	if (r)
+ 		goto err_async_pf;
+ 
++	WARN_ON(kvmi_init());
++
+ 	kvm_chardev_ops.owner = module;
+ 	kvm_vm_fops.owner = module;
+ 	kvm_vcpu_fops.owner = module;
+@@ -6614,6 +6648,7 @@ void kvm_exit(void)
+ 	kmem_cache_destroy(kvm_vcpu_cache);
+ 	kvm_gmem_exit();
+ 	kvm_vfio_ops_exit();
++	kvmi_uninit();
+ 	kvm_async_pf_deinit();
+ 	kvm_irqfd_exit();
+ }
+-- 
+2.56.0
+

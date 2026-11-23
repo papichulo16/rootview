@@ -1,0 +1,231 @@
+From 7d3306b165d7cd058e4cba1f159022d191e5976a Mon Sep 17 00:00:00 2001
+From: Dominick Morales <dmorales2024@my.fit.edu>
+Date: Tue, 17 Nov 2026 13:00:19 -0500
+Subject: [PATCH 4/4] KVM: SVM: introspection support and single-step
+
+Breakpoint, CR3-write, MSR-write and descriptor-table interception for
+the introspection tool, merged with KVM's own intercepts.
+
+kvmi-v7 only single-stepped on VMX (monitor trap flag). AMD has no MTF,
+so step with RFLAGS.TF and the always-intercepted #DB, the way
+nmi_singlestep does, keeping TF hidden from the guest. Event injection
+is held off while stepping so an interrupt can't run with relaxed page
+access.
+---
+ arch/x86/kvm/svm/svm.c | 129 ++++++++++++++++++++++++++++++++++++++++-
+ arch/x86/kvm/svm/svm.h |   3 +
+ 2 files changed, 131 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/kvm/svm/svm.c b/arch/x86/kvm/svm/svm.c
+index c054803..e1b66c9 100644
+--- a/arch/x86/kvm/svm/svm.c
++++ b/arch/x86/kvm/svm/svm.c
+@@ -692,7 +692,8 @@ void svm_set_intercept_for_msr(struct kvm_vcpu *vcpu, u32 msr, int type, bool se
+ 	}
+ 
+ 	if (type & MSR_TYPE_W) {
+-		if (!set && kvm_msr_allowed(vcpu, msr, KVM_MSR_FILTER_WRITE))
++		if (!set && kvm_msr_allowed(vcpu, msr, KVM_MSR_FILTER_WRITE) &&
++		    !kvmi_msrw_intercepted(vcpu, msr))
+ 			svm_clear_msr_bitmap_write(msrpm, msr);
+ 		else
+ 			svm_set_msr_bitmap_write(msrpm, msr);
+@@ -1502,6 +1503,9 @@ static unsigned long svm_get_rflags(struct kvm_vcpu *vcpu)
+ 		if (!(svm->nmi_singlestep_guest_rflags & X86_EFLAGS_RF))
+ 			rflags &= ~X86_EFLAGS_RF;
+ 	}
++	if (svm->kvmi_singlestep &&
++	    !(svm->kvmi_singlestep_guest_rflags & X86_EFLAGS_TF))
++		rflags &= ~X86_EFLAGS_TF;
+ 	return rflags;
+ }
+ 
+@@ -1509,6 +1513,10 @@ static void svm_set_rflags(struct kvm_vcpu *vcpu, unsigned long rflags)
+ {
+ 	if (to_svm(vcpu)->nmi_singlestep)
+ 		rflags |= (X86_EFLAGS_TF | X86_EFLAGS_RF);
++	if (to_svm(vcpu)->kvmi_singlestep) {
++		to_svm(vcpu)->kvmi_singlestep_guest_rflags = rflags;
++		rflags |= X86_EFLAGS_TF;
++	}
+ 
+        /*
+         * Any change of EFLAGS.VM is accompanied by a reload of SS
+@@ -1890,6 +1898,9 @@ static void svm_update_exception_bitmap(struct kvm_vcpu *vcpu)
+ 		if (vcpu->guest_debug & KVM_GUESTDBG_USE_SW_BP)
+ 			set_exception_intercept(svm, BP_VECTOR);
+ 	}
++
++	if (kvmi_bp_intercepted(vcpu))
++		set_exception_intercept(svm, BP_VECTOR);
+ }
+ 
+ static void new_asid(struct vcpu_svm *svm, struct svm_cpu_data *sd)
+@@ -2032,6 +2043,14 @@ static int db_interception(struct kvm_vcpu *vcpu)
+ 	struct kvm_run *kvm_run = vcpu->run;
+ 	struct vcpu_svm *svm = to_svm(vcpu);
+ 
++	if (svm->kvmi_singlestep && (svm->vmcb->save.dr6 & DR6_BS)) {
++		kvmi_arch_singlestep_complete(vcpu);
++		if (!(svm->kvmi_singlestep_guest_rflags & X86_EFLAGS_TF) &&
++		    !svm->nmi_singlestep &&
++		    !(vcpu->guest_debug & KVM_GUESTDBG_SINGLESTEP))
++			return 1;
++	}
++
+ 	if (!(vcpu->guest_debug &
+ 	      (KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_USE_HW_BP)) &&
+ 		!svm->nmi_singlestep) {
+@@ -2065,6 +2084,16 @@ static int bp_interception(struct kvm_vcpu *vcpu)
+ 	struct vcpu_svm *svm = to_svm(vcpu);
+ 	struct kvm_run *kvm_run = vcpu->run;
+ 
++	if (kvmi_bp_intercepted(vcpu)) {
++		if (!kvmi_breakpoint_event(vcpu, svm->vmcb->save.cs.base +
++						 svm->vmcb->save.rip, 1))
++			return 1;
++		if (!(vcpu->guest_debug & KVM_GUESTDBG_USE_SW_BP)) {
++			kvm_queue_exception(vcpu, BP_VECTOR);
++			return 1;
++		}
++	}
++
+ 	kvm_run->exit_reason = KVM_EXIT_DEBUG;
+ 	kvm_run->debug.arch.pc = svm->vmcb->save.cs.base + svm->vmcb->save.rip;
+ 	kvm_run->debug.arch.exception = BP_VECTOR;
+@@ -3338,6 +3367,87 @@ static int vmmcall_interception(struct kvm_vcpu *vcpu)
+ 	return kvm_emulate_hypercall(vcpu);
+ }
+ 
++#ifdef CONFIG_KVM_INTROSPECTION
++static int descriptor_access_interception(struct kvm_vcpu *vcpu)
++{
++	u64 code = to_svm(vcpu)->vmcb->control.exit_code;
++	static const u8 desc[] = {
++		KVMI_DESC_IDTR, KVMI_DESC_GDTR, KVMI_DESC_LDTR, KVMI_DESC_TR
++	};
++	u8 write = code >= SVM_EXIT_IDTR_WRITE;
++
++	if (!kvmi_descriptor_event(vcpu, desc[(code - SVM_EXIT_IDTR_READ) & 3],
++				   write))
++		return 1;
++
++	return kvm_emulate_instruction(vcpu, 0);
++}
++
++static void svm_kvmi_control_cr3w(struct kvm_vcpu *vcpu, bool enable)
++{
++	struct vcpu_svm *svm = to_svm(vcpu);
++
++	if (enable)
++		svm_set_intercept(svm, INTERCEPT_CR3_WRITE);
++	else if (npt_enabled)
++		svm_clr_intercept(svm, INTERCEPT_CR3_WRITE);
++}
++
++static void svm_kvmi_control_msrw(struct kvm_vcpu *vcpu, u32 msr, bool enable)
++{
++	if (enable)
++		svm_set_intercept_for_msr(vcpu, msr, MSR_TYPE_W, true);
++	else
++		kvm_make_request(KVM_REQ_RECALC_INTERCEPTS, vcpu);
++}
++
++static bool svm_kvmi_control_desc(struct kvm_vcpu *vcpu, bool enable)
++{
++	struct vcpu_svm *svm = to_svm(vcpu);
++	int i;
++
++	for (i = INTERCEPT_STORE_IDTR; i <= INTERCEPT_LOAD_TR; i++) {
++		if (enable)
++			svm_set_intercept(svm, i);
++		else
++			svm_clr_intercept(svm, i);
++	}
++
++	return true;
++}
++
++/*
++ * AMD has no monitor trap flag, so single-step with RFLAGS.TF and the
++ * always-intercepted #DB, like nmi_singlestep. TF stays hidden from the
++ * guest unless the guest set it itself.
++ */
++static bool svm_kvmi_control_singlestep(struct kvm_vcpu *vcpu, bool enable)
++{
++	struct vcpu_svm *svm = to_svm(vcpu);
++	u64 rflags;
++
++	if (enable != svm->kvmi_singlestep) {
++		rflags = svm_get_rflags(vcpu);
++		svm->kvmi_singlestep = enable;
++		svm_set_rflags(vcpu, rflags);
++	}
++
++	return true;
++}
++
++static u8 svm_kvmi_insn_len(struct kvm_vcpu *vcpu)
++{
++	struct vcpu_svm *svm = to_svm(vcpu);
++	u64 next_rip = svm->vmcb->control.next_rip;
++
++	if (!nrips || !next_rip || next_rip < kvm_rip_read(vcpu) ||
++	    next_rip - kvm_rip_read(vcpu) > 15)
++		return 0;
++
++	return next_rip - kvm_rip_read(vcpu);
++}
++#endif
++
+ static int (*const svm_exit_handlers[])(struct kvm_vcpu *vcpu) = {
+ 	[SVM_EXIT_READ_CR0]			= cr_interception,
+ 	[SVM_EXIT_READ_CR3]			= cr_interception,
+@@ -3377,6 +3487,16 @@ static int (*const svm_exit_handlers[])(struct kvm_vcpu *vcpu) = {
+ 	[SVM_EXIT_VINTR]			= interrupt_window_interception,
+ 	[SVM_EXIT_RDPMC]			= kvm_emulate_rdpmc,
+ 	[SVM_EXIT_CPUID]			= kvm_emulate_cpuid,
++#ifdef CONFIG_KVM_INTROSPECTION
++	[SVM_EXIT_IDTR_READ]			= descriptor_access_interception,
++	[SVM_EXIT_GDTR_READ]			= descriptor_access_interception,
++	[SVM_EXIT_LDTR_READ]			= descriptor_access_interception,
++	[SVM_EXIT_TR_READ]			= descriptor_access_interception,
++	[SVM_EXIT_IDTR_WRITE]			= descriptor_access_interception,
++	[SVM_EXIT_GDTR_WRITE]			= descriptor_access_interception,
++	[SVM_EXIT_LDTR_WRITE]			= descriptor_access_interception,
++	[SVM_EXIT_TR_WRITE]			= descriptor_access_interception,
++#endif
+ 	[SVM_EXIT_IRET]                         = iret_interception,
+ 	[SVM_EXIT_INVD]                         = kvm_emulate_invd,
+ 	[SVM_EXIT_PAUSE]			= pause_interception,
+@@ -5463,6 +5583,13 @@ struct kvm_x86_ops svm_x86_ops __initdata = {
+ 	.apic_init_signal_blocked = svm_apic_init_signal_blocked,
+ 
+ 	.recalc_intercepts = svm_recalc_intercepts,
++#ifdef CONFIG_KVM_INTROSPECTION
++	.kvmi_control_cr3w = svm_kvmi_control_cr3w,
++	.kvmi_control_msrw = svm_kvmi_control_msrw,
++	.kvmi_control_desc = svm_kvmi_control_desc,
++	.kvmi_control_singlestep = svm_kvmi_control_singlestep,
++	.kvmi_insn_len = svm_kvmi_insn_len,
++#endif
+ 	.complete_emulated_msr = svm_complete_emulated_msr,
+ 
+ 	.vcpu_deliver_sipi_vector = svm_vcpu_deliver_sipi_vector,
+diff --git a/arch/x86/kvm/svm/svm.h b/arch/x86/kvm/svm/svm.h
+index 29bde74..af03c65 100644
+--- a/arch/x86/kvm/svm/svm.h
++++ b/arch/x86/kvm/svm/svm.h
+@@ -329,6 +329,9 @@ struct vcpu_svm {
+ 	bool nmi_singlestep;
+ 	u64 nmi_singlestep_guest_rflags;
+ 
++	bool kvmi_singlestep;
++	u64 kvmi_singlestep_guest_rflags;
++
+ 	bool nmi_l1_to_l2;
+ 
+ 	unsigned long soft_int_csbase;
+-- 
+2.56.0
+

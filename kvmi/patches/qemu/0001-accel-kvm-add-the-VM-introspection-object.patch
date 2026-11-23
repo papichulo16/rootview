@@ -1,0 +1,664 @@
+From 099278782a49b5f3b2639073ebcf3b1dedb1ba76 Mon Sep 17 00:00:00 2001
+From: Dominick Morales <dmorales2024@my.fit.edu>
+Date: Tue, 17 Nov 2026 18:01:03 +0000
+Subject: [PATCH 1/2] accel/kvm: add the VM introspection object
+
+-object introspection,id=kvmi,chardev=<socket chardev> connects to an
+introspection tool (e.g. LibVMI over libkvmi), does the kvmi-v7
+handshake and passes the socket to KVM with KVM_INTROSPECTION_HOOK.
+KVM then talks to the tool directly. Unhooks on disconnect, reset and
+shutdown; reconnects through the chardev's reconnect-ms.
+
+Forward-ported from the KVM-VMI kvmi-v7 QEMU (4.2.1) without remote
+memory mapping and suspend/migration interception.
+---
+ accel/kvm/meson.build |   1 +
+ accel/kvm/vmi.c       | 574 ++++++++++++++++++++++++++++++++++++++++++
+ qapi/qom.json         |  24 ++
+ 3 files changed, 599 insertions(+)
+ create mode 100644 accel/kvm/vmi.c
+
+diff --git a/accel/kvm/meson.build b/accel/kvm/meson.build
+index 397a1fe1..bcc9727c 100644
+--- a/accel/kvm/meson.build
++++ b/accel/kvm/meson.build
+@@ -2,6 +2,7 @@ kvm_ss = ss.source_set()
+ kvm_ss.add(files(
+   'kvm-all.c',
+   'kvm-accel-ops.c',
++  'vmi.c',
+ ))
+ 
+ specific_ss.add_all(when: 'CONFIG_KVM', if_true: kvm_ss)
+diff --git a/accel/kvm/vmi.c b/accel/kvm/vmi.c
+new file mode 100644
+index 00000000..5efc0a8e
+--- /dev/null
++++ b/accel/kvm/vmi.c
+@@ -0,0 +1,574 @@
++/*
++ * VM Introspection
++ *
++ * Hands a socket connected to the introspection tool over to KVM, which
++ * then speaks the KVMI protocol with the tool directly.
++ *
++ * Copyright (C) 2017-2020 Bitdefender S.R.L.
++ * Ported to QEMU 11 for rootview.
++ *
++ * This work is licensed under the terms of the GNU GPL, version 2 or later.
++ * See the COPYING file in the top-level directory.
++ */
++
++#include "qemu/osdep.h"
++#include "qapi/error.h"
++#include "qapi/visitor.h"
++#include "qemu/error-report.h"
++#include "qemu/module.h"
++#include "qom/object_interfaces.h"
++#include "system/system.h"
++#include "system/reset.h"
++#include "system/runstate.h"
++#include "system/kvm.h"
++#include "crypto/secret.h"
++#include "crypto/hash.h"
++#include "chardev/char.h"
++#include "chardev/char-fe.h"
++#include "chardev/char-socket.h"
++#include "io/channel-socket.h"
++
++/* Introspection UAPI of the rootview KVMI modules (kvm-vmi kvmi-v7 ABI). */
++#define KVM_CAP_INTROSPECTION 999
++
++struct kvm_introspection_hook {
++    __s32 fd;
++    __u32 padding;
++    __u8 uuid[16];
++};
++
++struct kvm_introspection_feature {
++    __u32 allow;
++    __s32 id;
++};
++
++#define KVM_INTROSPECTION_HOOK    _IOW(KVMIO, 0xff, struct kvm_introspection_hook)
++#define KVM_INTROSPECTION_UNHOOK  _IO(KVMIO, 0xfb)
++#define KVM_INTROSPECTION_COMMAND _IOW(KVMIO, 0xfd, struct kvm_introspection_feature)
++#define KVM_INTROSPECTION_EVENT   _IOW(KVMIO, 0xfc, struct kvm_introspection_feature)
++
++enum { QEMU_VMI_NAME_SIZE = 64 };
++enum { QEMU_VMI_COOKIE_HASH_SIZE = 20 };
++
++typedef struct qemu_vmi_to_introspector {
++    uint32_t struct_size;
++    uint8_t  uuid[16];
++    uint32_t padding;
++    int64_t  start_time;
++    char     name[QEMU_VMI_NAME_SIZE];
++} qemu_vmi_to_introspector;
++
++typedef struct qemu_vmi_from_introspector {
++    uint32_t struct_size;
++    uint8_t  cookie_hash[QEMU_VMI_COOKIE_HASH_SIZE];
++} qemu_vmi_from_introspector;
++
++#define HANDSHAKE_TIMEOUT_SEC 10
++
++#define TYPE_VM_INTROSPECTION "introspection"
++OBJECT_DECLARE_SIMPLE_TYPE(VMIntrospection, VM_INTROSPECTION)
++
++struct VMIntrospection {
++    Object parent_obj;
++
++    char *chardevid;
++    Chardev *chr;
++    CharFrontend sock;
++    bool connected;
++
++    char *keyid;
++    uint8_t cookie_hash[QEMU_VMI_COOKIE_HASH_SIZE];
++    bool key_with_cookie;
++
++    qemu_vmi_from_introspector hsk_in;
++    uint64_t hsk_in_read_pos;
++    uint64_t hsk_in_read_size;
++    GSource *hsk_timer;
++    uint32_t handshake_timeout;
++
++    int64_t vm_start_time;
++
++    Notifier machine_ready;
++    Notifier shutdown;
++
++    bool kvmi_hooked;
++};
++
++static const int32_t all_IDs = -1;
++static VMIntrospection *vmi_instance;
++
++static void cancel_handshake_timer(VMIntrospection *i)
++{
++    if (i->hsk_timer) {
++        g_source_destroy(i->hsk_timer);
++        g_source_unref(i->hsk_timer);
++        i->hsk_timer = NULL;
++    }
++}
++
++static void unhook_kvmi(VMIntrospection *i)
++{
++    if (i->kvmi_hooked) {
++        if (kvm_vm_ioctl(kvm_state, KVM_INTROSPECTION_UNHOOK, NULL)) {
++            error_report("VMI: ioctl/KVM_INTROSPECTION_UNHOOK failed, errno %d",
++                         errno);
++        }
++        i->kvmi_hooked = false;
++    }
++}
++
++static void disconnect_and_unhook_kvmi(VMIntrospection *i)
++{
++    if (i->connected) {
++        qemu_chr_fe_disconnect(&i->sock);
++    }
++    unhook_kvmi(i);
++}
++
++static void update_vm_start_time(VMIntrospection *i)
++{
++    i->vm_start_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME) / 1000;
++}
++
++static bool send_handshake_info(VMIntrospection *i, Error **errp)
++{
++    qemu_vmi_to_introspector send = {};
++    const char *vm_name;
++    int r;
++
++    send.struct_size = sizeof(send);
++    send.start_time = i->vm_start_time;
++    memcpy(&send.uuid, &qemu_uuid, sizeof(send.uuid));
++    vm_name = qemu_get_vm_name();
++    if (vm_name) {
++        snprintf(send.name, sizeof(send.name), "%s", vm_name);
++    }
++
++    r = qemu_chr_fe_write_all(&i->sock, (uint8_t *)&send, sizeof(send));
++    if (r != sizeof(send)) {
++        error_setg_errno(errp, errno, "VMI: error writing to '%s'",
++                         i->chardevid);
++        return false;
++    }
++
++    /* tcp_chr_write may call tcp_chr_disconnect/CHR_EVENT_CLOSED */
++    if (!i->connected) {
++        error_setg(errp, "VMI: qemu_chr_fe_write_all() failed");
++        return false;
++    }
++
++    return true;
++}
++
++static bool validate_handshake(VMIntrospection *i, Error **errp)
++{
++    uint32_t min_accepted_size;
++
++    min_accepted_size = offsetof(qemu_vmi_from_introspector, cookie_hash)
++                        + QEMU_VMI_COOKIE_HASH_SIZE;
++
++    if (i->hsk_in.struct_size < min_accepted_size) {
++        error_setg(errp, "VMI: not enough or invalid handshake data");
++        return false;
++    }
++
++    if (i->key_with_cookie &&
++        memcmp(i->cookie_hash, i->hsk_in.cookie_hash, sizeof(i->cookie_hash))) {
++        error_setg(errp, "VMI: received cookie doesn't match");
++        return false;
++    }
++
++    return true;
++}
++
++static bool allow_all(int ioctl, Error **errp)
++{
++    struct kvm_introspection_feature feature = { .allow = 1, .id = all_IDs };
++
++    if (kvm_vm_ioctl(kvm_state, ioctl, &feature)) {
++        error_setg_errno(errp, errno, "VMI: feature ioctl %d failed", ioctl);
++        return false;
++    }
++
++    return true;
++}
++
++static int chardev_socket_fd(Chardev *chr)
++{
++    SocketChardev *s = SOCKET_CHARDEV(chr);
++
++    return s->sioc ? s->sioc->fd : -1;
++}
++
++static bool connect_kernel(VMIntrospection *i, Error **errp)
++{
++    struct kvm_introspection_hook kernel = {};
++
++    memcpy(kernel.uuid, &qemu_uuid, sizeof(kernel.uuid));
++    kernel.fd = chardev_socket_fd(i->chr);
++
++    if (kvm_vm_ioctl(kvm_state, KVM_INTROSPECTION_HOOK, &kernel)) {
++        error_setg_errno(errp, errno,
++                         "VMI: ioctl/KVM_INTROSPECTION_HOOK failed");
++        if (errno == EPERM) {
++            error_append_hint(errp,
++                              "Reload the kvm module with introspection=1\n");
++        }
++        return false;
++    }
++
++    i->kvmi_hooked = true;
++
++    if (!allow_all(KVM_INTROSPECTION_COMMAND, errp) ||
++        !allow_all(KVM_INTROSPECTION_EVENT, errp)) {
++        unhook_kvmi(i);
++        return false;
++    }
++
++    info_report("VMI: machine hooked");
++    return true;
++}
++
++/*
++ * We should read only the handshake structure,
++ * which might have a different size than what we expect.
++ */
++static int vmi_chr_can_read(void *opaque)
++{
++    VMIntrospection *i = opaque;
++
++    if (i->hsk_timer == NULL || !i->connected) {
++        return 0;
++    }
++
++    if (i->hsk_in_read_pos == 0) {
++        return sizeof(i->hsk_in.struct_size);
++    }
++
++    if (i->hsk_in.struct_size < sizeof(i->hsk_in.struct_size)) {
++        return 0;
++    }
++
++    return i->hsk_in.struct_size - i->hsk_in_read_size;
++}
++
++static void vmi_chr_read(void *opaque, const uint8_t *buf, int size)
++{
++    VMIntrospection *i = opaque;
++    Error *local_err = NULL;
++    size_t to_read;
++
++    i->hsk_in_read_size += size;
++
++    to_read = sizeof(i->hsk_in) - i->hsk_in_read_pos;
++    if (to_read > size) {
++        to_read = size;
++    }
++
++    if (to_read) {
++        memcpy((uint8_t *)&i->hsk_in + i->hsk_in_read_pos, buf, to_read);
++        i->hsk_in_read_pos += to_read;
++    }
++
++    if (i->hsk_in_read_pos < sizeof(i->hsk_in.struct_size) ||
++        i->hsk_in_read_size != i->hsk_in.struct_size) {
++        return;
++    }
++
++    cancel_handshake_timer(i);
++
++    if (!validate_handshake(i, &local_err) ||
++        !connect_kernel(i, &local_err)) {
++        error_append_hint(&local_err, "reconnecting\n");
++        warn_report_err(local_err);
++        qemu_chr_fe_disconnect(&i->sock);
++    }
++}
++
++static gboolean vmi_hsk_timeout(gpointer opaque)
++{
++    VMIntrospection *i = opaque;
++
++    warn_report("VMI: the handshake takes too long");
++
++    g_source_unref(i->hsk_timer);
++    i->hsk_timer = NULL;
++
++    disconnect_and_unhook_kvmi(i);
++    return G_SOURCE_REMOVE;
++}
++
++static void vmi_chr_event_open(VMIntrospection *i)
++{
++    Error *local_err = NULL;
++
++    i->connected = true;
++
++    memset(&i->hsk_in, 0, sizeof(i->hsk_in));
++    i->hsk_in_read_pos = 0;
++    i->hsk_in_read_size = 0;
++
++    i->hsk_timer = qemu_chr_timeout_add_ms(i->chr,
++                                           i->handshake_timeout * 1000,
++                                           vmi_hsk_timeout, i);
++
++    if (!send_handshake_info(i, &local_err)) {
++        error_append_hint(&local_err, "reconnecting\n");
++        warn_report_err(local_err);
++        qemu_chr_fe_disconnect(&i->sock);
++        return;
++    }
++
++    info_report("VMI: handshake started");
++}
++
++static void vmi_chr_event_closed(VMIntrospection *i)
++{
++    i->connected = false;
++
++    if (i->kvmi_hooked) {
++        warn_report("VMI: introspection tool disconnected");
++        unhook_kvmi(i);
++    }
++
++    cancel_handshake_timer(i);
++}
++
++static void vmi_chr_event(void *opaque, QEMUChrEvent event)
++{
++    VMIntrospection *i = opaque;
++
++    switch (event) {
++    case CHR_EVENT_OPENED:
++        vmi_chr_event_open(i);
++        break;
++    case CHR_EVENT_CLOSED:
++        vmi_chr_event_closed(i);
++        break;
++    default:
++        break;
++    }
++}
++
++static bool make_cookie_hash(const char *key_id, uint8_t *cookie_hash,
++                             Error **errp)
++{
++    g_autofree uint8_t *cookie = NULL;
++    g_autofree uint8_t *hash = NULL;
++    size_t cookie_size, hash_size = 0;
++
++    if (qcrypto_secret_lookup(key_id, &cookie, &cookie_size, errp) ||
++        qcrypto_hash_bytes(QCRYPTO_HASH_ALGO_SHA1, (const char *)cookie,
++                           cookie_size, &hash, &hash_size, errp)) {
++        return false;
++    }
++
++    if (hash_size != QEMU_VMI_COOKIE_HASH_SIZE) {
++        error_setg(errp, "VMI: hash algorithm size mismatch");
++        return false;
++    }
++
++    memcpy(cookie_hash, hash, QEMU_VMI_COOKIE_HASH_SIZE);
++    return true;
++}
++
++static bool vm_introspection_init(VMIntrospection *i, Error **errp)
++{
++    Chardev *chr;
++
++    if (!kvm_enabled()) {
++        error_setg(errp, "VMI: missing KVM support");
++        return false;
++    }
++
++    if (kvm_check_extension(kvm_state, KVM_CAP_INTROSPECTION) == 0) {
++        error_setg(errp, "VMI: the kvm module was built without introspection");
++        return false;
++    }
++
++    if (i->keyid) {
++        if (!make_cookie_hash(i->keyid, i->cookie_hash, errp)) {
++            return false;
++        }
++        i->key_with_cookie = true;
++    } else {
++        warn_report("VMI: the introspection tool won't be 'authenticated'");
++    }
++
++    chr = qemu_chr_find(i->chardevid);
++    if (!chr) {
++        error_setg(errp, "VMI: device '%s' not found", i->chardevid);
++        return false;
++    }
++
++    if (!object_dynamic_cast(OBJECT(chr), TYPE_CHARDEV_SOCKET)) {
++        error_setg(errp, "VMI: device '%s' is not a socket", i->chardevid);
++        return false;
++    }
++
++    if (SOCKET_CHARDEV(chr)->reconnect_time_ms <= 0) {
++        warn_report("VMI: '%s' has no reconnect-ms, only one session is "
++                    "possible", i->chardevid);
++    }
++
++    if (!qemu_chr_fe_init(&i->sock, chr, errp)) {
++        return false;
++    }
++
++    i->chr = chr;
++
++    qemu_chr_fe_set_handlers(&i->sock, vmi_chr_can_read, vmi_chr_read,
++                             vmi_chr_event, NULL, i, NULL, true);
++
++    return true;
++}
++
++static void vmi_machine_ready(Notifier *notifier, void *data)
++{
++    VMIntrospection *i = container_of(notifier, VMIntrospection,
++                                      machine_ready);
++    Error *err = NULL;
++
++    if (!vm_introspection_init(i, &err)) {
++        error_report_err(err);
++        exit(1);
++    }
++}
++
++static void vmi_shutdown_notify(Notifier *notifier, void *data)
++{
++    VMIntrospection *i = container_of(notifier, VMIntrospection, shutdown);
++
++    disconnect_and_unhook_kvmi(i);
++}
++
++static void vmi_reset(void *opaque)
++{
++    VMIntrospection *i = opaque;
++
++    if (i->connected) {
++        info_report("VMI: Reset, closing the socket...");
++    }
++
++    disconnect_and_unhook_kvmi(i);
++    update_vm_start_time(i);
++}
++
++static void vmi_complete(UserCreatable *uc, Error **errp)
++{
++    VMIntrospection *i = VM_INTROSPECTION(uc);
++
++    if (vmi_instance) {
++        error_setg(errp, "VMI: only one introspection object can be created");
++        return;
++    }
++
++    if (!i->chardevid) {
++        error_setg(errp, "VMI: chardev is not set");
++        return;
++    }
++
++    vmi_instance = i;
++    update_vm_start_time(i);
++
++    i->machine_ready.notify = vmi_machine_ready;
++    qemu_add_machine_init_done_notifier(&i->machine_ready);
++
++    i->shutdown.notify = vmi_shutdown_notify;
++    qemu_register_shutdown_notifier(&i->shutdown);
++
++    qemu_register_reset(vmi_reset, i);
++}
++
++static bool vmi_can_be_deleted(UserCreatable *uc)
++{
++    return !VM_INTROSPECTION(uc)->connected;
++}
++
++static void prop_set_chardev(Object *obj, const char *value, Error **errp)
++{
++    VMIntrospection *i = VM_INTROSPECTION(obj);
++
++    g_free(i->chardevid);
++    i->chardevid = g_strdup(value);
++}
++
++static void prop_set_key(Object *obj, const char *value, Error **errp)
++{
++    VMIntrospection *i = VM_INTROSPECTION(obj);
++
++    g_free(i->keyid);
++    i->keyid = g_strdup(value);
++}
++
++static void prop_get_uint32(Object *obj, Visitor *v, const char *name,
++                            void *opaque, Error **errp)
++{
++    visit_type_uint32(v, name, opaque, errp);
++}
++
++static void prop_set_uint32(Object *obj, Visitor *v, const char *name,
++                            void *opaque, Error **errp)
++{
++    visit_type_uint32(v, name, opaque, errp);
++}
++
++static void vmi_class_init(ObjectClass *oc, const void *data)
++{
++    UserCreatableClass *uc = USER_CREATABLE_CLASS(oc);
++
++    uc->complete = vmi_complete;
++    uc->can_be_deleted = vmi_can_be_deleted;
++}
++
++static void vmi_instance_init(Object *obj)
++{
++    VMIntrospection *i = VM_INTROSPECTION(obj);
++
++    object_property_add_str(obj, "chardev", NULL, prop_set_chardev);
++    object_property_add_str(obj, "key", NULL, prop_set_key);
++
++    i->handshake_timeout = HANDSHAKE_TIMEOUT_SEC;
++    object_property_add(obj, "handshake-timeout", "uint32",
++                        prop_get_uint32, prop_set_uint32,
++                        NULL, &i->handshake_timeout);
++}
++
++static void vmi_instance_finalize(Object *obj)
++{
++    VMIntrospection *i = VM_INTROSPECTION(obj);
++
++    g_free(i->chardevid);
++    g_free(i->keyid);
++
++    cancel_handshake_timer(i);
++
++    if (i->chr) {
++        qemu_chr_fe_deinit(&i->sock, true);
++    }
++
++    if (vmi_instance == i) {
++        vmi_instance = NULL;
++        qemu_unregister_reset(vmi_reset, i);
++    }
++}
++
++static const TypeInfo vmi_info = {
++    .name              = TYPE_VM_INTROSPECTION,
++    .parent            = TYPE_OBJECT,
++    .class_init        = vmi_class_init,
++    .instance_size     = sizeof(VMIntrospection),
++    .instance_finalize = vmi_instance_finalize,
++    .instance_init     = vmi_instance_init,
++    .interfaces        = (const InterfaceInfo[]) {
++        { TYPE_USER_CREATABLE },
++        { }
++    }
++};
++
++static void register_types(void)
++{
++    type_register_static(&vmi_info);
++}
++
++type_init(register_types);
+diff --git a/qapi/qom.json b/qapi/qom.json
+index c653248f..9a5fe5c0 100644
+--- a/qapi/qom.json
++++ b/qapi/qom.json
+@@ -510,6 +510,26 @@
+   'base': 'NetfilterProperties',
+   'data': { '*vnet_hdr_support': 'bool' } }
+ 
++##
++# @IntrospectionProperties:
++#
++# Properties for introspection objects (KVMI).
++#
++# @chardev: socket chardev connected to the introspection tool
++#
++# @key: id of a secret whose SHA-1 the tool must send back
++#
++# @handshake-timeout: seconds to wait for the tool's handshake
++#     (default: 10)
++#
++# Since: 11.0
++##
++{ 'struct': 'IntrospectionProperties',
++  'data': { 'chardev': 'str',
++            '*key': 'str',
++            '*handshake-timeout': 'uint32' },
++  'if': 'CONFIG_LINUX' }
++
+ ##
+ # @InputBarrierProperties:
+ #
+@@ -1216,6 +1236,8 @@
+     { 'name': 'igvm-cfg',
+       'if': 'CONFIG_IGVM' },
+     'input-barrier',
++    { 'name': 'introspection',
++      'if': 'CONFIG_LINUX' },
+     { 'name': 'input-linux',
+       'if': 'CONFIG_LINUX' },
+     'iommufd',
+@@ -1294,6 +1316,8 @@
+       'igvm-cfg':                   { 'type': 'IgvmCfgProperties',
+                                       'if': 'CONFIG_IGVM' },
+       'input-barrier':              'InputBarrierProperties',
++      'introspection':              { 'type': 'IntrospectionProperties',
++                                      'if': 'CONFIG_LINUX' },
+       'input-linux':                { 'type': 'InputLinuxProperties',
+                                       'if': 'CONFIG_LINUX' },
+       'iommufd':                    'IOMMUFDProperties',
+-- 
+2.55.0
+

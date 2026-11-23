@@ -1,0 +1,911 @@
+From 02465f0885d95c415d4292cd49c56727ea7a5d33 Mon Sep 17 00:00:00 2001
+From: Dominick Morales <dmorales2024@my.fit.edu>
+Date: Tue, 17 Nov 2026 13:00:19 -0500
+Subject: [PATCH 1/4] KVM: introspection: uapi and host interfaces
+
+Wire format of the KVM-VMI kvmi-v7 protocol as spoken by libkvmi 1.1
+(KVMI_VERSION 1, v6-compatible message ids, KVMI_EVENT_CPUID) plus the
+KVM_INTROSPECTION_* VM ioctls at 0xfa-0xff and KVM_CAP_INTROSPECTION.
+
+Per-vCPU interception state lives in struct kvm_vcpu_arch so vendor code
+can merge it with KVM's own needs. EPT views, #VE, SPP and remote
+mapping from kvmi-v7 are not carried over.
+
+Based on the Bitdefender KVMI patches (kvmi-v7, kvmi-v12).
+
+---
+ arch/x86/include/asm/kvm-x86-ops.h |   6 +
+ arch/x86/include/asm/kvm_host.h    |  13 ++
+ arch/x86/include/asm/kvmi_host.h   |  74 ++++++++
+ arch/x86/include/uapi/asm/kvmi.h   | 176 +++++++++++++++++++
+ include/linux/kvm_host.h           |  11 ++
+ include/linux/kvmi_host.h          | 183 ++++++++++++++++++++
+ include/uapi/linux/kvm.h           |  20 +++
+ include/uapi/linux/kvm_para.h      |   5 +
+ include/uapi/linux/kvmi.h          | 263 +++++++++++++++++++++++++++++
+ 9 files changed, 751 insertions(+)
+ create mode 100644 arch/x86/include/asm/kvmi_host.h
+ create mode 100644 arch/x86/include/uapi/asm/kvmi.h
+ create mode 100644 include/linux/kvmi_host.h
+ create mode 100644 include/uapi/linux/kvmi.h
+
+diff --git a/arch/x86/include/asm/kvm-x86-ops.h b/arch/x86/include/asm/kvm-x86-ops.h
+index e213c9a..dfb7773 100644
+--- a/arch/x86/include/asm/kvm-x86-ops.h
++++ b/arch/x86/include/asm/kvm-x86-ops.h
+@@ -157,6 +157,12 @@ KVM_X86_OP_OPTIONAL(gmem_make_shared)
+ KVM_X86_OP_OPTIONAL(gmem_invalidate_range)
+ #endif
+ KVM_X86_OP_OPTIONAL_RET0(gmem_max_mapping_level)
++KVM_X86_OP_OPTIONAL(kvmi_control_cr3w)
++KVM_X86_OP_OPTIONAL(kvmi_control_msrw)
++KVM_X86_OP_OPTIONAL_RET0(kvmi_control_desc)
++KVM_X86_OP_OPTIONAL_RET0(kvmi_control_singlestep)
++KVM_X86_OP_OPTIONAL_RET0(kvmi_insn_len)
++KVM_X86_OP_OPTIONAL_RET0(kvmi_fault_gla)
+ #endif
+ 
+ #undef KVM_X86_OP
+diff --git a/arch/x86/include/asm/kvm_host.h b/arch/x86/include/asm/kvm_host.h
+index 683bb8b..425ff72 100644
+--- a/arch/x86/include/asm/kvm_host.h
++++ b/arch/x86/include/asm/kvm_host.h
+@@ -39,6 +39,7 @@
+ #include <asm/asm.h>
+ #include <asm/irq_remapping.h>
+ #include <asm/kvm_page_track.h>
++#include <asm/kvmi_host.h>
+ #include <asm/kvm_vcpu_regs.h>
+ #include <asm/virt.h>
+ 
+@@ -126,6 +127,7 @@
+ 	KVM_ARCH_REQ_FLAGS(33, KVM_REQUEST_WAIT | KVM_REQUEST_NO_WAKEUP)
+ #define KVM_REQ_UPDATE_PROTECTED_GUEST_STATE \
+ 	KVM_ARCH_REQ_FLAGS(34, KVM_REQUEST_WAIT)
++#define KVM_REQ_INTROSPECTION		KVM_ARCH_REQ(35)
+ 
+ #define INVALID_PAGE (~(hpa_t)0)
+ #define VALID_PAGE(x) ((x) != INVALID_PAGE)
+@@ -1029,6 +1031,10 @@ struct kvm_vcpu_arch {
+ #if IS_ENABLED(CONFIG_HYPERV)
+ 	hpa_t hv_root_tdp;
+ #endif
++
++#ifdef CONFIG_KVM_INTROSPECTION
++	struct kvmi_vcpu_intercept kvmi;
++#endif
+ };
+ 
+ struct kvm_lpage_info {
+@@ -1739,6 +1745,13 @@ struct kvm_x86_ops {
+ 	void (*gmem_invalidate_range)(struct kvm *kvm, struct kvm_gfn_range *range);
+ #endif
+ 	int (*gmem_max_mapping_level)(struct kvm *kvm, kvm_pfn_t pfn, bool is_private);
++
++	void (*kvmi_control_cr3w)(struct kvm_vcpu *vcpu, bool enable);
++	void (*kvmi_control_msrw)(struct kvm_vcpu *vcpu, u32 msr, bool enable);
++	bool (*kvmi_control_desc)(struct kvm_vcpu *vcpu, bool enable);
++	bool (*kvmi_control_singlestep)(struct kvm_vcpu *vcpu, bool enable);
++	u8 (*kvmi_insn_len)(struct kvm_vcpu *vcpu);
++	u64 (*kvmi_fault_gla)(struct kvm_vcpu *vcpu);
+ };
+ 
+ struct kvm_x86_nested_ops {
+diff --git a/arch/x86/include/asm/kvmi_host.h b/arch/x86/include/asm/kvmi_host.h
+new file mode 100644
+index 0000000..2fe3fd0
+--- /dev/null
++++ b/arch/x86/include/asm/kvmi_host.h
+@@ -0,0 +1,74 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _ASM_X86_KVMI_HOST_H
++#define _ASM_X86_KVMI_HOST_H
++
++#include <linux/bitmap.h>
++
++struct msr_data;
++
++#define KVMI_NUM_CR 5
++#define KVMI_NUM_MSR 0x2000
++
++/*
++ * Interception state owned by the introspection tool. It lives in
++ * struct kvm_vcpu_arch so the vendor code can merge it with KVM's own
++ * needs without caring whether a tool is currently hooked.
++ */
++struct kvmi_vcpu_intercept {
++	bool bp;
++	bool cr3w;
++	bool desc;
++	bool singlestep;
++	bool restore;
++	bool ss_done;
++	u64 pf_error_code;
++	DECLARE_BITMAP(msrw_low, KVMI_NUM_MSR);
++	DECLARE_BITMAP(msrw_high, KVMI_NUM_MSR);
++};
++
++struct kvm_vcpu_arch_introspection {
++	DECLARE_BITMAP(cr_mask, KVMI_NUM_CR);
++};
++
++#ifdef CONFIG_KVM_INTROSPECTION
++
++bool kvmi_cr_event(struct kvm_vcpu *vcpu, unsigned int cr,
++		   unsigned long old_value, unsigned long *new_value);
++void kvmi_xsetbv_event(struct kvm_vcpu *vcpu);
++bool kvmi_descriptor_event(struct kvm_vcpu *vcpu, u8 descriptor, u8 write);
++bool kvmi_msr_event(struct kvm_vcpu *vcpu, struct msr_data *msr);
++bool kvmi_cpuid_event(struct kvm_vcpu *vcpu, u8 insn_len,
++		      unsigned int function, unsigned int index);
++bool kvmi_msrw_intercepted(struct kvm_vcpu *vcpu, u32 msr);
++void kvmi_arch_singlestep_complete(struct kvm_vcpu *vcpu);
++
++#define kvmi_bp_intercepted(vcpu)	READ_ONCE((vcpu)->arch.kvmi.bp)
++#define kvmi_cr3w_intercepted(vcpu)	READ_ONCE((vcpu)->arch.kvmi.cr3w)
++#define kvmi_desc_intercepted(vcpu)	READ_ONCE((vcpu)->arch.kvmi.desc)
++#define kvmi_singlestepping(vcpu)	READ_ONCE((vcpu)->arch.kvmi.singlestep)
++
++#else /* CONFIG_KVM_INTROSPECTION */
++
++static inline bool kvmi_cr_event(struct kvm_vcpu *vcpu, unsigned int cr,
++				 unsigned long old_value,
++				 unsigned long *new_value) { return true; }
++static inline void kvmi_xsetbv_event(struct kvm_vcpu *vcpu) { }
++static inline bool kvmi_descriptor_event(struct kvm_vcpu *vcpu, u8 descriptor,
++					 u8 write) { return true; }
++static inline bool kvmi_msr_event(struct kvm_vcpu *vcpu, struct msr_data *msr)
++				{ return true; }
++static inline bool kvmi_cpuid_event(struct kvm_vcpu *vcpu, u8 insn_len,
++				    unsigned int function, unsigned int index)
++				    { return true; }
++static inline bool kvmi_msrw_intercepted(struct kvm_vcpu *vcpu, u32 msr)
++				{ return false; }
++static inline void kvmi_arch_singlestep_complete(struct kvm_vcpu *vcpu) { }
++
++#define kvmi_bp_intercepted(vcpu)	false
++#define kvmi_cr3w_intercepted(vcpu)	false
++#define kvmi_desc_intercepted(vcpu)	false
++#define kvmi_singlestepping(vcpu)	false
++
++#endif /* CONFIG_KVM_INTROSPECTION */
++
++#endif /* _ASM_X86_KVMI_HOST_H */
+diff --git a/arch/x86/include/uapi/asm/kvmi.h b/arch/x86/include/uapi/asm/kvmi.h
+new file mode 100644
+index 0000000..4f272f4
+--- /dev/null
++++ b/arch/x86/include/uapi/asm/kvmi.h
+@@ -0,0 +1,176 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++#ifndef _UAPI_ASM_X86_KVMI_H
++#define _UAPI_ASM_X86_KVMI_H
++
++/*
++ * KVM introspection - x86 specific structures and definitions
++ */
++
++#include <asm/kvm.h>
++
++#define KVM_HC_XEN_HVM_OP_GUEST_REQUEST_VM_EVENT 24
++
++struct kvmi_event_arch {
++	__u8 mode;		/* 2, 4 or 8 */
++	__u8 padding1;
++	__u16 view;
++	__u32 padding2;
++	struct kvm_regs regs;
++	struct kvm_sregs sregs;
++	struct {
++		__u64 sysenter_cs;
++		__u64 sysenter_esp;
++		__u64 sysenter_eip;
++		__u64 efer;
++		__u64 star;
++		__u64 lstar;
++		__u64 cstar;
++		__u64 pat;
++		__u64 shadow_gs;
++	} msrs;
++};
++
++struct kvmi_vcpu_get_info_reply {
++	__u64 tsc_speed;
++};
++
++struct kvmi_vcpu_get_registers {
++	__u16 nmsrs;
++	__u16 padding1;
++	__u32 padding2;
++	__u32 msrs_idx[];
++};
++
++struct kvmi_vcpu_get_registers_reply {
++	__u32 mode;
++	__u32 padding;
++	struct kvm_regs regs;
++	struct kvm_sregs sregs;
++	struct kvm_msrs msrs;
++};
++
++struct kvmi_vcpu_get_cpuid {
++	__u32 function;
++	__u32 index;
++};
++
++struct kvmi_vcpu_get_cpuid_reply {
++	__u32 eax;
++	__u32 ebx;
++	__u32 ecx;
++	__u32 edx;
++};
++
++struct kvmi_event_breakpoint {
++	__u64 gpa;
++	__u8 insn_len;
++	__u8 padding[7];
++};
++
++struct kvmi_vcpu_control_cr {
++	__u8 enable;
++	__u8 padding1;
++	__u16 padding2;
++	__u32 cr;
++};
++
++struct kvmi_event_cr {
++	__u16 cr;
++	__u16 padding[3];
++	__u64 old_value;
++	__u64 new_value;
++};
++
++struct kvmi_event_cr_reply {
++	__u64 new_val;
++};
++
++struct kvmi_event_trap {
++	__u8 vector;
++	__u8 padding1;
++	__u16 padding2;
++	__u32 error_code;
++	__u64 cr2;
++};
++
++struct kvmi_vcpu_inject_exception {
++	__u8 nr;
++	__u8 padding1;
++	__u16 padding2;
++	__u32 error_code;
++	__u64 address;
++};
++
++struct kvmi_vcpu_get_xsave_reply {
++	__u32 region[0];
++};
++
++struct kvmi_vcpu_set_xsave {
++	__u32 region[0];
++};
++
++struct kvmi_vcpu_get_mtrr_type {
++	__u64 gpa;
++};
++
++struct kvmi_vcpu_get_mtrr_type_reply {
++	__u8 type;
++	__u8 padding[7];
++};
++
++#define KVMI_DESC_IDTR  1
++#define KVMI_DESC_GDTR  2
++#define KVMI_DESC_LDTR  3
++#define KVMI_DESC_TR    4
++
++struct kvmi_event_descriptor {
++	__u8 descriptor;
++	__u8 write;
++	__u8 padding[6];
++};
++
++struct kvmi_vcpu_control_msr {
++	__u8 enable;
++	__u8 padding1;
++	__u16 padding2;
++	__u32 msr;
++};
++
++struct kvmi_event_msr {
++	__u32 msr;
++	__u32 padding;
++	__u64 old_value;
++	__u64 new_value;
++};
++
++struct kvmi_event_cpuid {
++	__u32 function;
++	__u32 index;
++	__u8  insn_length;
++	__u8  padding1[3];
++	__u32 padding2;
++};
++
++struct kvmi_event_msr_reply {
++	__u64 new_val;
++};
++
++struct kvmi_features {
++	__u8 spp;
++	__u8 vmfunc;
++	__u8 eptp;
++	__u8 ve;
++	__u8 singlestep;
++	__u8 padding[3];
++};
++
++struct kvmi_vcpu_get_xcr {
++	__u8 xcr;
++	__u8 padding[7];
++};
++
++struct kvmi_vcpu_get_xcr_reply {
++	__u64 value;
++};
++
++#endif /* _UAPI_ASM_X86_KVMI_H */
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index c844def..fdb87d1 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -43,6 +43,8 @@
+ #include <linux/kvm_types.h>
+ 
+ #include <asm/kvm_host.h>
++
++#include <linux/kvmi_host.h>
+ #include <linux/kvm_dirty_ring.h>
+ 
+ #ifndef KVM_MAX_VCPU_IDS
+@@ -386,6 +388,9 @@ struct kvm_vcpu {
+ 	bool ready;
+ 	bool scheduled_out;
+ 	struct kvm_vcpu_arch arch;
++#ifdef CONFIG_KVM_INTROSPECTION
++	struct kvm_vcpu_introspection *kvmi;
++#endif
+ 	struct kvm_vcpu_stat stat;
+ 	char stats_id[KVM_STATS_NAME_SIZE];
+ 	struct kvm_dirty_ring dirty_ring;
+@@ -831,6 +836,12 @@ struct kvm {
+ 	struct list_head ioeventfds;
+ 	struct kvm_vm_stat stat;
+ 	struct kvm_arch arch;
++#ifdef CONFIG_KVM_INTROSPECTION
++	struct mutex kvmi_lock;
++	refcount_t kvmi_ref;
++	struct completion kvmi_complete;
++	struct kvm_introspection *kvmi;
++#endif
+ 	refcount_t users_count;
+ #ifdef CONFIG_KVM_MMIO
+ 	struct kvm_coalesced_mmio_ring *coalesced_mmio_ring;
+diff --git a/include/linux/kvmi_host.h b/include/linux/kvmi_host.h
+new file mode 100644
+index 0000000..e7a985d
+--- /dev/null
++++ b/include/linux/kvmi_host.h
+@@ -0,0 +1,183 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __KVMI_HOST_H
++#define __KVMI_HOST_H
++
++#include <uapi/linux/kvmi.h>
++
++struct kvm;
++struct kvm_vcpu;
++
++#include <asm/kvmi_host.h>
++
++#define KVMI_NUM_COMMANDS KVMI_NUM_MESSAGES
++
++struct kvmi_vcpu_reply {
++	int error;
++	int action;
++	u32 seq;
++	void *data;
++	size_t size;
++};
++
++#define KVMI_CTX_DATA_SIZE sizeof_field(struct kvmi_event_pf_reply, ctx_data)
++
++struct kvmi_custom_ro_data {
++	u8 data[KVMI_CTX_DATA_SIZE];
++	size_t size;
++	gva_t addr;
++};
++
++struct kvmi_job {
++	struct list_head link;
++	void *ctx;
++	void (*fct)(struct kvm_vcpu *vcpu, void *ctx);
++	void (*free_fct)(void *ctx);
++};
++
++struct kvm_vcpu_introspection {
++	struct kvm_vcpu_arch_introspection arch;
++
++	struct list_head job_list;
++	spinlock_t job_lock;
++
++	atomic_t pause_requests;
++
++	struct kvmi_vcpu_reply reply;
++	bool waiting_for_reply;
++
++	DECLARE_BITMAP(ev_mask, KVMI_NUM_EVENTS);
++
++	struct kvm_regs delayed_regs;
++	bool have_delayed_regs;
++
++	struct {
++		u8 nr;
++		u32 error_code;
++		bool error_code_valid;
++		u64 address;
++		bool pending;
++		bool send_event;
++	} exception;
++
++	struct {
++		bool loop;
++		bool owner;
++	} singlestep;
++
++	bool rep_complete;
++	bool effective_rep_complete;
++	struct kvmi_custom_ro_data custom_ro_data;
++};
++
++#define SINGLESTEP_MAX_DEPTH 8
++
++struct kvm_introspection {
++	struct kvm *kvm;
++
++	uuid_t uuid;
++
++	struct socket *sock;
++	struct task_struct *recv;
++
++	DECLARE_BITMAP(cmd_allow_mask, KVMI_NUM_COMMANDS);
++	DECLARE_BITMAP(event_allow_mask, KVMI_NUM_EVENTS);
++
++	DECLARE_BITMAP(vm_event_enable_mask, KVMI_NUM_EVENTS);
++
++	atomic_t ev_seq;
++
++	struct xarray access;
++	struct mutex access_lock;
++	atomic_t nr_restricted;
++
++	struct {
++		atomic_t active;
++		struct {
++			gfn_t gfn;
++			u8 old_access;
++		} backup[SINGLESTEP_MAX_DEPTH];
++		u8 level;
++		struct kvmi_custom_ro_data custom_ro_data;
++	} singlestep;
++
++	bool cmd_reply_disabled;
++	bool cmd_reply_with_event;
++};
++
++#ifdef CONFIG_KVM_INTROSPECTION
++
++int kvmi_init(void);
++void kvmi_uninit(void);
++void kvmi_create_vm(struct kvm *kvm);
++void kvmi_destroy_vm(struct kvm *kvm);
++int kvmi_vcpu_init(struct kvm_vcpu *vcpu);
++void kvmi_vcpu_uninit(struct kvm_vcpu *vcpu);
++
++int kvmi_ioctl_hook(struct kvm *kvm, void __user *argp);
++int kvmi_ioctl_unhook(struct kvm *kvm);
++int kvmi_ioctl_command(struct kvm *kvm, void __user *argp);
++int kvmi_ioctl_event(struct kvm *kvm, void __user *argp);
++int kvmi_ioctl_preunhook(struct kvm *kvm);
++
++void kvmi_handle_requests(struct kvm_vcpu *vcpu);
++bool kvmi_hypercall_event(struct kvm_vcpu *vcpu);
++bool kvmi_breakpoint_event(struct kvm_vcpu *vcpu, u64 gva, u8 insn_len);
++void kvmi_enter_guest(struct kvm_vcpu *vcpu);
++bool kvmi_vcpu_pending_event(struct kvm_vcpu *vcpu);
++bool kvmi_vcpu_running_singlestep(struct kvm_vcpu *vcpu);
++void kvmi_singlestep_done(struct kvm_vcpu *vcpu);
++void kvmi_singlestep_failed(struct kvm_vcpu *vcpu);
++void kvmi_init_emulate(struct kvm_vcpu *vcpu);
++void kvmi_activate_rep_complete(struct kvm_vcpu *vcpu);
++bool kvmi_singlestep_insn(struct kvm_vcpu *vcpu, gpa_t gpa,
++			  int *emulation_type);
++
++bool kvmi_page_track_preread(struct kvm_vcpu *vcpu, gpa_t gpa, gva_t gva,
++			     u8 *new, int bytes, bool *data_ready);
++bool kvmi_page_track_prewrite(struct kvm_vcpu *vcpu, gpa_t gpa, gva_t gva);
++bool kvmi_page_track_preexec(struct kvm_vcpu *vcpu, gpa_t gpa, gva_t gva);
++u8 kvmi_gfn_allowed_access(struct kvm *kvm, gfn_t gfn);
++bool kvmi_gfn_range_restricted(struct kvm *kvm, gfn_t start, gfn_t end);
++
++#else
++
++static inline int kvmi_init(void) { return 0; }
++static inline void kvmi_uninit(void) { }
++static inline void kvmi_create_vm(struct kvm *kvm) { }
++static inline void kvmi_destroy_vm(struct kvm *kvm) { }
++static inline int kvmi_vcpu_init(struct kvm_vcpu *vcpu) { return 0; }
++static inline void kvmi_vcpu_uninit(struct kvm_vcpu *vcpu) { }
++
++static inline void kvmi_handle_requests(struct kvm_vcpu *vcpu) { }
++static inline bool kvmi_hypercall_event(struct kvm_vcpu *vcpu) { return false; }
++static inline bool kvmi_breakpoint_event(struct kvm_vcpu *vcpu, u64 gva,
++					 u8 insn_len) { return true; }
++static inline void kvmi_enter_guest(struct kvm_vcpu *vcpu) { }
++static inline bool kvmi_vcpu_pending_event(struct kvm_vcpu *vcpu)
++			{ return false; }
++static inline bool kvmi_vcpu_running_singlestep(struct kvm_vcpu *vcpu)
++			{ return false; }
++static inline void kvmi_singlestep_done(struct kvm_vcpu *vcpu) { }
++static inline void kvmi_singlestep_failed(struct kvm_vcpu *vcpu) { }
++static inline void kvmi_init_emulate(struct kvm_vcpu *vcpu) { }
++static inline void kvmi_activate_rep_complete(struct kvm_vcpu *vcpu) { }
++static inline bool kvmi_singlestep_insn(struct kvm_vcpu *vcpu, gpa_t gpa,
++					int *emulation_type) { return false; }
++
++static inline bool kvmi_page_track_preread(struct kvm_vcpu *vcpu, gpa_t gpa,
++					   gva_t gva, u8 *new, int bytes,
++					   bool *data_ready)
++			{ *data_ready = false; return true; }
++static inline bool kvmi_page_track_prewrite(struct kvm_vcpu *vcpu, gpa_t gpa,
++					    gva_t gva) { return true; }
++static inline bool kvmi_page_track_preexec(struct kvm_vcpu *vcpu, gpa_t gpa,
++					   gva_t gva) { return true; }
++static inline u8 kvmi_gfn_allowed_access(struct kvm *kvm, gfn_t gfn)
++			{ return KVMI_PAGE_ACCESS_R | KVMI_PAGE_ACCESS_W |
++				 KVMI_PAGE_ACCESS_X; }
++static inline bool kvmi_gfn_range_restricted(struct kvm *kvm, gfn_t start,
++					     gfn_t end) { return false; }
++
++#endif /* CONFIG_KVM_INTROSPECTION */
++
++#endif
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index ac2d77d..dd60f9f 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -997,6 +997,7 @@ struct kvm_enable_cap {
+ #define KVM_CAP_S390_KEYOP 247
+ #define KVM_CAP_S390_VSIE_ESAMODE 248
+ #define KVM_CAP_S390_HPAGE_2G 249
++#define KVM_CAP_INTROSPECTION 999
+ #define KVM_CAP_PPC_COMPAT_CAPS 250
+ #define KVM_CAP_ARM_PMU_V3_STRICT 251
+ 
+@@ -1674,4 +1675,23 @@ struct kvm_pre_fault_memory {
+ 	__u64 padding[5];
+ };
+ 
++struct kvm_introspection_hook {
++	__s32 fd;
++	__u32 padding;
++	__u8 uuid[16];
++};
++
++#define KVM_INTROSPECTION_HOOK    _IOW(KVMIO, 0xff, struct kvm_introspection_hook)
++#define KVM_INTROSPECTION_UNHOOK  _IO(KVMIO, 0xfb)
++
++struct kvm_introspection_feature {
++	__u32 allow;
++	__s32 id;
++};
++
++#define KVM_INTROSPECTION_COMMAND _IOW(KVMIO, 0xfd, struct kvm_introspection_feature)
++#define KVM_INTROSPECTION_EVENT   _IOW(KVMIO, 0xfc, struct kvm_introspection_feature)
++
++#define KVM_INTROSPECTION_PREUNHOOK  _IO(KVMIO, 0xfe)
++
+ #endif /* __LINUX_KVM_H */
+diff --git a/include/uapi/linux/kvm_para.h b/include/uapi/linux/kvm_para.h
+index 960c7e9..6a76e54 100644
+--- a/include/uapi/linux/kvm_para.h
++++ b/include/uapi/linux/kvm_para.h
+@@ -17,6 +17,10 @@
+ #define KVM_E2BIG		E2BIG
+ #define KVM_EPERM		EPERM
+ #define KVM_EOPNOTSUPP		95
++#define KVM_EAGAIN		11
++#define KVM_ENOENT		ENOENT
++#define KVM_ENOMEM		ENOMEM
++#define KVM_EBUSY		EBUSY
+ 
+ #define KVM_HC_VAPIC_POLL_IRQ		1
+ #define KVM_HC_MMU_OP			2
+@@ -30,6 +34,7 @@
+ #define KVM_HC_SEND_IPI		10
+ #define KVM_HC_SCHED_YIELD		11
+ #define KVM_HC_MAP_GPA_RANGE		12
++#define KVM_HC_XEN_HVM_OP		34 /* Xen's __HYPERVISOR_hvm_op */
+ 
+ /*
+  * hypercalls use architecture specific
+diff --git a/include/uapi/linux/kvmi.h b/include/uapi/linux/kvmi.h
+new file mode 100644
+index 0000000..ededa24
+--- /dev/null
++++ b/include/uapi/linux/kvmi.h
+@@ -0,0 +1,263 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++#ifndef _UAPI__LINUX_KVMI_H
++#define _UAPI__LINUX_KVMI_H
++
++/*
++ * KVMI structures and definitions
++ *
++ * Wire-compatible with the KVM-VMI kvmi-v7 ABI (libkvmi 1.1).
++ */
++
++#include <linux/kernel.h>
++#include <linux/types.h>
++#include <asm/kvmi.h>
++
++enum {
++	KVMI_VERSION = 0x00000001
++};
++
++enum {
++	KVMI_EVENT_REPLY       = 0,
++	KVMI_EVENT             = 1,
++
++	KVMI_GET_VERSION         = 2,
++	KVMI_VM_CHECK_COMMAND    = 3,
++	KVMI_VM_CHECK_EVENT      = 4,
++	KVMI_VM_GET_INFO         = 5,
++	KVMI_VM_CONTROL_EVENTS   = 8,
++	KVMI_VM_READ_PHYSICAL    = 17,
++	KVMI_VM_WRITE_PHYSICAL   = 18,
++
++	KVMI_VCPU_GET_INFO         = 6,
++	KVMI_VCPU_PAUSE            = 7,
++	KVMI_VCPU_CONTROL_EVENTS   = 9,
++	KVMI_VCPU_GET_REGISTERS    = 13,
++	KVMI_VCPU_SET_REGISTERS    = 14,
++	KVMI_VCPU_GET_CPUID        = 15,
++	KVMI_VCPU_CONTROL_CR       = 10,
++	KVMI_VCPU_INJECT_EXCEPTION = 19,
++
++	KVMI_VM_GET_MAX_GFN = 29,
++
++	KVMI_VCPU_GET_XSAVE     = 16,
++	KVMI_VCPU_GET_MTRR_TYPE = 23,
++	KVMI_VCPU_CONTROL_MSR   = 11,
++
++	KVMI_VM_SET_PAGE_ACCESS = 21,
++
++	KVMI_VCPU_CONTROL_SINGLESTEP = 63,
++	KVMI_VCPU_TRANSLATE_GVA      = 35,
++	KVMI_VCPU_GET_EPT_VIEW       = 34,
++	KVMI_VCPU_SET_EPT_VIEW       = 32,
++	KVMI_VCPU_CONTROL_EPT_VIEW   = 36,
++	KVMI_VCPU_SET_VE_INFO        = 28,
++	KVMI_VCPU_DISABLE_VE         = 33,
++	KVMI_VCPU_CHANGE_GFN         = 60,
++
++	KVMI_VM_SET_PAGE_SVE = 30,
++
++	KVMI_VM_GET_MAP_TOKEN = 22,
++	KVMI_VM_CONTROL_CMD_RESPONSE = 27,
++	KVMI_VM_CONTROL_SPP = 24,
++	KVMI_VM_SET_PAGE_WRITE_BITMAP = 26,
++
++	KVMI_VCPU_GET_XCR = 37,
++	KVMI_VCPU_SET_XSAVE = 38,
++
++	KVMI_NUM_MESSAGES = 64
++};
++
++enum {
++	KVMI_EVENT_UNHOOK      = 0,
++	KVMI_EVENT_PAUSE_VCPU  = 10,
++	KVMI_EVENT_HYPERCALL   = 5,
++	KVMI_EVENT_BREAKPOINT  = 4,
++	KVMI_EVENT_CR          = 1,
++	KVMI_EVENT_TRAP        = 7,
++	KVMI_EVENT_XSETBV      = 3,
++	KVMI_EVENT_DESCRIPTOR  = 8,
++	KVMI_EVENT_MSR         = 2,
++	KVMI_EVENT_PF          = 6,
++	KVMI_EVENT_SINGLESTEP  = 11,
++	KVMI_EVENT_CREATE_VCPU = 9,
++	KVMI_EVENT_CMD_ERROR   = 12,
++	KVMI_EVENT_CPUID       = 13,
++
++	KVMI_NUM_EVENTS
++};
++
++enum {
++	KVMI_EVENT_ACTION_CONTINUE = 0,
++	KVMI_EVENT_ACTION_RETRY    = 1,
++	KVMI_EVENT_ACTION_CRASH    = 2,
++};
++
++enum {
++	KVMI_PAGE_ACCESS_R = 1 << 0,
++	KVMI_PAGE_ACCESS_W = 1 << 1,
++	KVMI_PAGE_ACCESS_X = 1 << 2,
++	KVMI_PAGE_SVE      = 1 << 3,
++};
++
++struct kvmi_msg_hdr {
++	__u16 id;
++	__u16 size;
++	__u32 seq;
++};
++
++enum {
++	KVMI_MSG_SIZE = (4096 * 2 - sizeof(struct kvmi_msg_hdr))
++};
++
++struct kvmi_error_code {
++	__s32 err;
++	__u32 padding;
++};
++
++struct kvmi_get_version_reply {
++	__u32 version;
++	__u32 padding;
++	struct kvmi_features features;
++};
++
++struct kvmi_vm_check_command {
++	__u16 id;
++	__u16 padding1;
++	__u32 padding2;
++};
++
++struct kvmi_vm_check_event {
++	__u16 id;
++	__u16 padding1;
++	__u32 padding2;
++};
++
++struct kvmi_vm_get_info_reply {
++	__u32 vcpu_count;
++	__u32 padding[3];
++};
++
++struct kvmi_vm_control_events {
++	__u16 event_id;
++	__u8 enable;
++	__u8 padding1;
++	__u32 padding2;
++};
++
++struct kvmi_vm_read_physical {
++	__u64 gpa;
++	__u64 size;
++};
++
++struct kvmi_vm_write_physical {
++	__u64 gpa;
++	__u64 size;
++	__u8  data[];
++};
++
++struct kvmi_vcpu_hdr {
++	__u16 vcpu;
++	__u16 padding1;
++	__u32 padding2;
++};
++
++struct kvmi_vcpu_pause {
++	__u8 wait;
++	__u8 padding1;
++	__u16 padding2;
++	__u32 padding3;
++};
++
++struct kvmi_vcpu_control_events {
++	__u16 event_id;
++	__u8 enable;
++	__u8 padding1;
++	__u32 padding2;
++};
++
++struct kvmi_vm_get_max_gfn_reply {
++	__u64 gfn;
++};
++
++struct kvmi_page_access_entry {
++	__u64 gpa;
++	__u8 access;
++	__u8 padding1;
++	__u16 padding2;
++	__u32 padding3;
++};
++
++struct kvmi_vm_set_page_access {
++	__u16 view;
++	__u16 count;
++	__u32 padding;
++	struct kvmi_page_access_entry entries[];
++};
++
++struct kvmi_vcpu_control_singlestep {
++	__u8 enable;
++	__u8 padding[7];
++};
++
++struct kvmi_event {
++	__u16 size;
++	__u16 vcpu;
++	__u8 event;
++	__u8 padding[3];
++	struct kvmi_event_arch arch;
++};
++
++struct kvmi_event_reply {
++	__u8 action;
++	__u8 event;
++	__u16 padding1;
++	__u32 padding2;
++};
++
++struct kvmi_event_pf {
++	__u64 gva;
++	__u64 gpa;
++	__u8 access;
++	__u8 padding1;
++	__u16 padding2;
++	__u32 padding3;
++};
++
++struct kvmi_event_pf_reply {
++	__u64 ctx_addr;
++	__u32 ctx_size;
++	__u8 padding1;
++	__u8 rep_complete;
++	__u16 padding2;
++	__u8 ctx_data[256];
++};
++
++struct kvmi_event_singlestep {
++	__u8 failed;
++	__u8 padding[7];
++};
++
++struct kvmi_vcpu_translate_gva {
++	__u64 gva;
++};
++
++struct kvmi_vcpu_translate_gva_reply {
++	__u64 gpa;
++};
++
++struct kvmi_vm_control_cmd_response {
++	__u8 enable;
++	__u8 now;
++	__u8 flags;
++	__u8 padding1;
++	__u32 padding2;
++};
++
++struct kvmi_event_cmd_error {
++	__s32 err;
++	__u32 msg_seq;
++	__u16 msg_id;
++	__u16 padding[3];
++};
++
++#endif /* _UAPI__LINUX_KVMI_H */
+-- 
+2.56.0
+
