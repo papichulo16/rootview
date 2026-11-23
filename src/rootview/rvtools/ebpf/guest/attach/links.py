@@ -3,8 +3,8 @@ it attaches that program to.
 
 Each link type embeds struct bpf_link at the start of its own struct, which
 says where the program is attached. Raw tracepoint, tracing (fentry, fexit,
-fmod_ret, LSM, freplace), cgroup and XDP links are decoded; any other type
-is reported with an empty target.
+fmod_ret, LSM, freplace), cgroup, XDP and perf event links are decoded; any
+other type is reported with an empty target.
 """
 
 from __future__ import annotations
@@ -15,12 +15,14 @@ from rootview.rvprim import Guest
 from rootview.rvtools.common import Layout, is_kernel_va, read_cstr, read_u64
 from rootview.rvtools.ebpf.guest.attach.attachment import Attachment
 from rootview.rvtools.ebpf.guest.attach.cgroups import Cgroups
+from rootview.rvtools.ebpf.guest.attach.perf import Perf
 
 
 class Links:
-    def __init__(self, g: Guest, cgroups: Cgroups | None = None) -> None:
+    def __init__(self, g: Guest, cgroups: Cgroups | None = None, perf: Perf | None = None) -> None:
         self.g = g
         self.cgroups = cgroups
+        self.perf = perf
         self.link = Layout(g, "bpf_link", "id", "prog")
         self._offs: dict[tuple[str, str], int] = {}
         self.decoders: dict[str, Callable[[int, int], tuple[str, str]]] = {
@@ -28,6 +30,7 @@ class Links:
             "BPF_LINK_TYPE_TRACING": self._tracing,
             "BPF_LINK_TYPE_CGROUP": self._cgroup,
             "BPF_LINK_TYPE_XDP": self._xdp,
+            "BPF_LINK_TYPE_PERF_EVENT": self._perf,
         }
 
     def link_idr(self) -> list[int]:
@@ -73,3 +76,9 @@ class Links:
     def _xdp(self, link: int, prog: int) -> tuple[str, str]:
         dev = self._ptr(link, "bpf_xdp_link", "dev")
         return "BPF_XDP", str(self.g.read_field("net_device", "name", dev).value) if is_kernel_va(dev) else ""
+
+    def _perf(self, link: int, prog: int) -> tuple[str, str]:
+        file = self._ptr(link, "bpf_perf_link", "perf_file")
+        event = self._ptr(file, "file", "private_data") if is_kernel_va(file) else 0
+        self.perf = self.perf or Perf(self.g)
+        return "BPF_PERF_EVENT", self.perf.target(event) if is_kernel_va(event) else ""

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -11,11 +12,14 @@ from fastapi.testclient import TestClient
 from rootview_web.app import create_app
 from rootview_web.backends.libvmi import LibVMIBackend
 from rootview_web.config import Settings
-from rootview_web.engine import GuestPool, bpf
+from rootview_web.engine import GuestPool
 from rootview_web.engine import pool as engine_pool
+from rootview_web.engine.bpf import phone as bpf_phone
+from rootview_web.engine.bpf import vm as bpf_vm
 from rootview_web.schemas import BpfMapType, BpfProgType, VMState
 
 KTEXT = 0xFFFFFFFF81000000
+LOADED = datetime(2026, 11, 23, tzinfo=timezone.utc)
 
 
 class RootviewError(RuntimeError):
@@ -230,6 +234,25 @@ class FakeBpf:
         return [SimpleNamespace(id=5, name="m", type="BPF_MAP_TYPE_HASH", key_size=4, value_size=8, max_entries=16)]
 
 
+def ebpf_prog(addr, id, name, type, tag, insns, jited_len, maps=(), helpers=(), uid=0, jited=True):
+    info = SimpleNamespace(addr=addr, id=id, name=name, type=type, tag=tag, len=insns, jited=jited,
+                           jited_len=jited_len, uid=uid, loaded_at=LOADED)
+    return SimpleNamespace(info=info, maps=[SimpleNamespace(id=m) for m in maps], helpers=list(helpers))
+
+
+def fake_collect(g):
+    programs = [ebpf_prog(0x10, 3, "probe", "BPF_PROG_TYPE_KPROBE", "0001020304050607", 10, 64, maps=(5,)),
+                ebpf_prog(0x20, 4, "new", "BPF_PROG_TYPE_FUTURE", "00" * 8, 1, 0, uid=None, jited=False),
+                ebpf_prog(0x30, 111, "handle_getdents", "BPF_PROG_TYPE_TRACEPOINT", "01" * 8, 200, 900, maps=(5,),
+                          helpers=("bpf_probe_read_user", "bpf_probe_write_user"))]
+    maps = FakeBpf(g).maps()
+    found = [SimpleNamespace(prog=0x30, source=s, target="syscalls:sys_exit_getdents64", link=None, link_type=None)
+             for s in ("event", "perf")]
+    found.append(SimpleNamespace(prog=0x10, source="link", target="", link=9, link_type="BPF_LINK_TYPE_NETNS"))
+    held = {0x10: [SimpleNamespace(pid=1, comm="systemd")], 0x30: [SimpleNamespace(pid=6612, comm="pidhide")]}
+    return programs, maps, found, held
+
+
 def client(prim, **settings):
     app = create_app(Settings(backend="none", scan_interval=60, **settings))
     pool = GuestPool(prim=prim)
@@ -242,7 +265,8 @@ def client(prim, **settings):
 
 @pytest.fixture
 def prim(monkeypatch):
-    monkeypatch.setattr(bpf, "Bpf", FakeBpf)
+    monkeypatch.setattr(bpf_phone, "Bpf", FakeBpf)
+    monkeypatch.setattr(bpf_vm, "collect", fake_collect)
     return FakePrim()
 
 
@@ -412,6 +436,12 @@ def test_snapshot_carries_helpers_attach_and_loader(c):
     assert (rootkit["loader_uid"], rootkit["loader_pid"], rootkit["loader_comm"]) == (0, 6612, "pidhide")
 
 
+def test_vm_snapshot_reads_ebpf(c):
+    probe = c.get("/api/vms/web/snapshot").json()["programs"][0]
+    assert datetime.fromisoformat(probe["loaded_at"]) == LOADED
+    assert [a["target"] for a in probe["attach_points"]] == ["netns link 9"]
+
+
 def test_scan_flags_a_getdents_rootkit(c):
     rules = {(d["rule"], d["prog_id"]) for d in c.post("/api/vms/web/scan").json()["detections"]}
     assert rules == {("probe_write_user", 111), ("getdents_hook", 111)}
@@ -459,6 +489,7 @@ def test_phones_are_dashboard_guests(c):
 
 def test_scanning_a_phone_attaches_it(c, prim):
     assert c.post("/api/vms/PIXEL1/scan").json()["programs_examined"] == 3
+    assert c.get("/api/vms/PIXEL1/snapshot").json()["programs"][0]["loaded_at"] is None
     assert prim.guests["PIXEL1"].backend == "pkvm-vmi"
     vm = c.get("/api/vms/PIXEL1").json()
     assert vm["guest"]["profile_loaded"] is True and vm["guest"]["architecture"] == "arm64"

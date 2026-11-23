@@ -1,5 +1,5 @@
-"""Every loaded eBPF program: what it is, what it calls, where it is attached;
-then every map.
+"""Every loaded eBPF program: what it is, what it calls, where it is attached,
+which processes hold it; then every map.
 
     python examples/ebpf.py [vm] [--dump]
 """
@@ -8,7 +8,7 @@ import sys
 from collections import defaultdict
 
 from rootview.rvtools import attach
-from rootview.rvtools.ebpf import Progs, Resolver, analyze, attachments
+from rootview.rvtools.ebpf import Fds, Holders, Progs, Resolver, analyze, attachments
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 dump = "--dump" in sys.argv
@@ -17,7 +17,9 @@ with attach(args[0] if args else None) as g:
     with g.snapshot():
         programs = sorted((analyze(progs, res, p) for p in progs.prog_idr()), key=lambda p: p.info.id)
         maps = sorted((res.maps.info(m) for m in res.maps.map_idr()), key=lambda m: m.id)
-        found, errors = attachments(g)
+        fds, unread = Fds(g).all()
+        found, errors = attachments(g, fds)
+        held = Holders(g).index(fds)
 
 where = defaultdict(list)
 for a in found:
@@ -32,7 +34,9 @@ for p in programs:
           f"{len(p.cfg.back_edges):>5}  {', '.join(uses) or '-'}")
     for a in where.pop(i.addr, []):
         via = a.source if a.link is None else f"{a.source} (link {a.link})"
-        print(f"{'':6}{via:<16} {a.attach_type or a.link_type:<30} {a.target or '-'}")
+        print(f"{'':6}{via:<16} {a.attach_type or a.link_type or '-':<30} {a.target or '-'}")
+    if i.addr in held:
+        print(f"{'':6}{'held by':<16} {', '.join(f'{h.comm}({h.pid}) fd {h.fd} {h.via}' for h in held[i.addr])}")
     if dump:
         print("\n".join(p.listing()) + "\n")
 print(f"\n{len(programs)} programs, {len(found)} attachments")
@@ -47,3 +51,5 @@ for m in maps:
 print(f"\n{len(maps)} maps")
 for source, err in errors.items():
     print(f"{source} failed: {err}")
+for pid, err in unread.items():
+    print(f"pid {pid}'s fds not read: {err}")

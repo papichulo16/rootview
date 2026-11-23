@@ -46,7 +46,7 @@ class LibVMIBackend(IntrospectionBackend):
         def read(g):
             if vm.kind == "phone":
                 self._phone_release[vm_id] = _release(g)
-            return bpf.read(g, self.pool.profile_errors.get(vm_id))
+            return bpf.read(g, self.pool.profile_errors.get(vm_id), vm.kind == "phone")
 
         progs, maps = await self.pool.guest(vm_id, read)
         return BpfSnapshot(vm_id=vm_id, programs=progs, maps=maps)
