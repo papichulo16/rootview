@@ -27,6 +27,13 @@ int vmi_write_virt(vmi_session_t *session, uint64_t vaddr, const void *buf, size
  * call vmi_pause first so the address space doesn't shift mid-lookup. */
 int vmi_translate_virt(vmi_session_t *session, uint64_t vaddr, uint64_t *paddr, char *err, size_t err_len);
 
+/* re-reads the paging mode from vcpu 0 and drops libvmi's cached translations
+ * and pages. attach records the mode once, which is wrong when the guest was
+ * still in firmware or the bootloader then. */
+int vmi_refresh_paging(vmi_session_t *session, char *err, size_t err_len);
+
+/* both drop libvmi's cached translations and pages, so nothing cached while
+ * the guest ran is used inside a pause, nor carried out of one */
 int vmi_pause(vmi_session_t *session, char *err, size_t err_len);
 int vmi_resume(vmi_session_t *session, char *err, size_t err_len);
 

@@ -12,6 +12,7 @@ from rootview_web.app import create_app
 from rootview_web.backends.libvmi import LibVMIBackend
 from rootview_web.config import Settings
 from rootview_web.engine import GuestPool, bpf
+from rootview_web.engine import pool as engine_pool
 from rootview_web.schemas import BpfMapType, BpfProgType, VMState
 
 KTEXT = 0xFFFFFFFF81000000
@@ -52,14 +53,16 @@ class Vm:
 @dataclass
 class FakeGuest:
     name: str
-    profiled: bool = True
+    kernel_errors: dict = field(default_factory=dict)
+    profiled: bool = False
     hooks_: list = field(default_factory=list)
     mem: dict = field(default_factory=dict)
     closed: bool = False
 
     def load_profile(self):
-        if self.name == "noprof":
-            raise RootviewError("no BTF")
+        if self.name in self.kernel_errors:
+            raise RootviewError(self.kernel_errors[self.name])
+        self.profiled = True
 
     def close(self):
         self.closed = True
@@ -138,6 +141,7 @@ class FakePrim:
             "off": Vm("off", Config("off")),
         }
         self.guests = {}
+        self.kernel_errors = {"noprof": "no BTF"}
 
     def lib(self):
         if not self.loadable:
@@ -172,7 +176,9 @@ class FakePrim:
         vm = self.inspect_vm(name)
         if not (vm.running and vm.kvmi):
             raise RootviewError(f"vm '{name}' is not running")
-        g = self.guests[name] = FakeGuest(name, profiled=name != "noprof")
+        g = self.guests[name] = FakeGuest(name, self.kernel_errors)
+        if profile:
+            g.load_profile()
         return g
 
 
@@ -247,6 +253,16 @@ def test_snapshot_maps_kernel_enums(c):
 def test_snapshot_without_profile_is_an_error(c):
     r = c.get("/api/vms/noprof/snapshot")
     assert r.status_code == 502 and "no BTF" in r.json()["detail"]
+
+
+def test_profile_is_retried_once_the_kernel_is_up(prim, monkeypatch):
+    monkeypatch.setattr(engine_pool, "PROFILE_RETRY", 0)
+    prim.kernel_errors["web"] = "step 3 (image): anchor 0x0 isn't in the kernel image area"
+    with client(prim) as c:
+        assert c.get("/api/vms/web/snapshot").status_code == 502
+        del prim.kernel_errors["web"]
+        assert c.get("/api/vms/web/snapshot").json()["programs"]
+        assert c.get("/api/vms/web/details").json()["profile_error"] is None
 
 
 def test_powered_off_snapshot_is_empty(c):

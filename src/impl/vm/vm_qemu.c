@@ -18,6 +18,26 @@
  * has to be launched *by* libvirt, as a transient domain built from cfg. */
 
 #define XML_MAX 8192
+#define QEMU_BIN "/usr/local/bin/qemu-system-x86_64"
+
+/* major * 100 + minor of QEMU_BIN, 0 if unknown. */
+static int qemu_version(void) {
+    static int version = -1;
+    if (version >= 0) return version;
+
+    version = 0;
+    FILE *p = popen(QEMU_BIN " --version", "r");
+    if (!p) return version;
+    int major, minor;
+    if (fscanf(p, "QEMU emulator version %d.%d", &major, &minor) == 2) version = major * 100 + minor;
+    pclose(p);
+    return version;
+}
+
+/* QEMU 9.2 replaced the chardev's reconnect=<s> with reconnect-ms=<ms>. */
+static const char *kvmi_reconnect_opt(void) {
+    return qemu_version() >= 902 ? "reconnect-ms=1000" : "reconnect=1";
+}
 
 static void xml_append(char *xml, size_t *len, const char *fmt, ...) {
     va_list ap;
@@ -53,7 +73,8 @@ static void build_domain_xml(const vm_config_t *cfg, const char *qmp_abs, const 
     xml_append(xml, &len, "  <memory unit='MiB'>%d</memory>\n", cfg->memory_mb);
     xml_append(xml, &len, "  <currentMemory unit='MiB'>%d</currentMemory>\n", cfg->memory_mb);
     xml_append(xml, &len, "  <vcpu placement='static'>%d</vcpu>\n", cfg->cpus);
-    xml_append(xml, &len, "  <os><type arch='x86_64' machine='pc-i440fx-4.2'>hvm</type><boot dev='hd'/></os>\n");
+    /* plain 'pc': QEMU 11 dropped pc-i440fx-4.2, and on 4.2 'pc' is that machine */
+    xml_append(xml, &len, "  <os><type arch='x86_64' machine='pc'>hvm</type><boot dev='hd'/></os>\n");
     xml_append(xml, &len, "  <features><acpi/><apic/></features>\n");
     xml_append(xml, &len, "  <cpu mode='host-passthrough' check='none' migratable='on'/>\n");
     xml_append(xml, &len,
@@ -70,7 +91,7 @@ static void build_domain_xml(const vm_config_t *cfg, const char *qmp_abs, const 
     xml_append(xml, &len, "  <seclabel type='none' model='apparmor'/>\n");
 
     xml_append(xml, &len, "  <devices>\n");
-    xml_append(xml, &len, "    <emulator>/usr/local/bin/qemu-system-x86_64</emulator>\n");
+    xml_append(xml, &len, "    <emulator>" QEMU_BIN "</emulator>\n");
 
     if (cfg->disk_image[0]) {
         xml_append(xml, &len,
@@ -124,10 +145,10 @@ static void build_domain_xml(const vm_config_t *cfg, const char *qmp_abs, const 
     if (kvmi_abs && kvmi_abs[0]) {
         xml_append(xml, &len,
                    "    <qemu:arg value='-chardev'/>\n"
-                   "    <qemu:arg value='socket,path=%s,id=kvmi_chardev,reconnect=1'/>\n"
+                   "    <qemu:arg value='socket,path=%s,id=kvmi_chardev,%s'/>\n"
                    "    <qemu:arg value='-object'/>\n"
                    "    <qemu:arg value='introspection,id=kvmi,chardev=kvmi_chardev'/>\n",
-                   kvmi_abs);
+                   kvmi_abs, kvmi_reconnect_opt());
     }
 
     if (cfg->extra_args[0]) {

@@ -201,6 +201,26 @@ int vmi_translate_virt(vmi_session_t *session, uint64_t vaddr, uint64_t *paddr, 
     return 0;
 }
 
+/* what libvmi cached while the guest ran can be stale: vmalloc addresses get
+ * remapped as kernel objects are freed and reallocated */
+static void drop_caches(vmi_session_t *session) {
+    vmi_v2pcache_flush(session->vmi, ~0ull);
+    vmi_pagecache_flush(session->vmi);
+}
+
+int vmi_refresh_paging(vmi_session_t *session, char *err, size_t err_len) {
+    if (!session->attached) {
+        if (err) snprintf(err, err_len, "session not attached");
+        return -1;
+    }
+    drop_caches(session);
+    if (VMI_PM_UNKNOWN == vmi_init_paging(session->vmi, 0)) {
+        if (err) snprintf(err, err_len, "failed to determine paging mode");
+        return -1;
+    }
+    return 0;
+}
+
 int vmi_pause(vmi_session_t *session, char *err, size_t err_len) {
     if (!session->attached) {
         if (err) snprintf(err, err_len, "session not attached");
@@ -210,6 +230,7 @@ int vmi_pause(vmi_session_t *session, char *err, size_t err_len) {
         if (err) snprintf(err, err_len, "pause failed");
         return -1;
     }
+    drop_caches(session);
     return 0;
 }
 
@@ -218,6 +239,7 @@ int vmi_resume(vmi_session_t *session, char *err, size_t err_len) {
         if (err) snprintf(err, err_len, "session not attached");
         return -1;
     }
+    drop_caches(session);
     if (vmi_resume_vm(session->vmi) != VMI_SUCCESS) {
         if (err) snprintf(err, err_len, "resume failed");
         return -1;

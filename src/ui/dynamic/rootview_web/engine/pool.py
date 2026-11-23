@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from collections.abc import Callable
 from types import ModuleType
 from typing import Any, TypeVar
@@ -17,6 +18,8 @@ except ImportError:
 
 T = TypeVar("T")
 
+PROFILE_RETRY = 5.0
+
 
 class GuestPool:
     def __init__(self, store: str | None = None, prim: ModuleType | None = None) -> None:
@@ -24,6 +27,7 @@ class GuestPool:
         self.prim = prim or rvprim
         self.ready = False
         self.profile_errors: dict[str, str] = {}
+        self._profile_due: dict[str, float] = {}
         self._guests: dict[str, Any] = {}
         self._locks: dict[str, threading.Lock] = {}
         self._mutex = threading.Lock()
@@ -77,18 +81,22 @@ class GuestPool:
                 raise BackendError(f"{vm_id}: {e}") from e
 
     def _attach(self, vm_id: str) -> Any:
-        if vm_id in self._guests:
-            return self._guests[vm_id]
-        if vm_id not in {v.name for v in self._call(self.prim.list_vms)}:
-            raise UnknownVMError(f"no guest named {vm_id!r}")
-        g = self._call(self.prim.Guest, vm_id, False)
+        g = self._guests.get(vm_id)
+        if g is None:
+            if vm_id not in {v.name for v in self._call(self.prim.list_vms)}:
+                raise UnknownVMError(f"no guest named {vm_id!r}")
+            g = self._guests[vm_id] = self._call(self.prim.Guest, vm_id, False)
+        if not g.profiled and time.monotonic() >= self._profile_due.get(vm_id, 0.0):
+            self._profile(vm_id, g)
+        return g
+
+    def _profile(self, vm_id: str, g: Any) -> None:
         try:
             g.load_profile()
             self.profile_errors.pop(vm_id, None)
         except self.prim.RootviewError as e:
             self.profile_errors[vm_id] = str(e)
-        self._guests[vm_id] = g
-        return g
+            self._profile_due[vm_id] = time.monotonic() + PROFILE_RETRY
 
     def _running(self, vm_id: str) -> bool:
         try:
@@ -105,6 +113,7 @@ class GuestPool:
         if g is not None:
             g.close()
         self.profile_errors.pop(vm_id, None)
+        self._profile_due.pop(vm_id, None)
 
     def _close_all(self) -> None:
         for vm_id in list(self._guests):

@@ -7,6 +7,8 @@ haur haur haur haur haur haur haur
 ### Init
 You need to set up bare-metal KVM-VMI, we have a VM with it all set up in `RELEASES`. But if you need to do it yourself for your machine, [just follow this guide](https://kvm-vmi.github.io/kvm-vmi/kvmi-v7/setup.html)
 
+For a current host (Ubuntu 26.10, Linux 7.3), use the KVMI port in [`kvmi/`](kvmi/README.md) instead. This folder contains patched KVM modules for the stock kernel, QEMU 11 and LibVMI.
+
 #### Docker building
 Build inside docker image built in `build/Dockerfile`. This docker container should setup LibVMI for you.
 

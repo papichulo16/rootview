@@ -91,6 +91,7 @@ int kprof_init(kprof_t *kp, vmi_session_t *session, char *err, size_t err_len) {
     paused = true;
 
     step = 2;
+    if (vmi_refresh_paging(session, e, sizeof(e)) != 0) goto fail;
     uint64_t lstar;
     if (vmi_read_reg(session, MSR_LSTAR, &lstar, e, sizeof(e)) != 0) goto fail;
 
