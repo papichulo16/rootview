@@ -249,15 +249,17 @@ const RootViewGuest = (() => {
       while (body.children.length > 500) body.lastChild.remove();
       $("event-info").textContent = `(${received} received${dropped ? `, ${dropped} dropped` : ""})`;
     }
+    // a phone page has no hooks panel: pkvm-vmi has no hooks
+    const hookForm = $("hook-form");
     let timer = null;
-    $("auto-poll").addEventListener("change", (ev) => {
+    if (hookForm) $("auto-poll").addEventListener("change", (ev) => {
       clearInterval(timer);
       timer = ev.target.checked ? setInterval(async () => {
         try { await poll(); } catch (err) { notice(err.message); ev.target.checked = false; clearInterval(timer); }
       }, 1500) : null;
     });
-    $("poll").addEventListener("click", guarded(poll));
-    $("clear-events").addEventListener("click", () => {
+    $("poll")?.addEventListener("click", guarded(poll));
+    $("clear-events")?.addEventListener("click", () => {
       $("events").replaceChildren();
       received = dropped = 0;
       $("event-info").textContent = "";
@@ -330,28 +332,29 @@ const RootViewGuest = (() => {
       ]);
     }));
 
-    const hookForm = $("hook-form");
     function showHookInputs() {
       const kind = field(hookForm, "kind").value;
       hookForm.querySelectorAll("[data-kinds]").forEach((input) => {
         input.hidden = !input.dataset.kinds.split(" ").includes(kind);
       });
     }
-    field(hookForm, "kind").addEventListener("change", showHookInputs);
-    showHookInputs();
-    hookForm.addEventListener("submit", guarded(async (event) => {
-      event.preventDefault();
-      const v = formValues(hookForm);
-      const body = { name: v.name, kind: v.kind };
-      if (v.kind === "register") body.reg = v.reg;
-      if (v.kind === "breakpoint" || v.kind === "mem") body.addr = await resolveAddr(v.addr);
-      if (v.kind === "cpuid") body.leaf = v.leaf || "any";
-      if (v.kind === "descriptor") body.table = v.table;
-      if (v.kind === "mem") body.access = v.access;
-      renderHooks(await api("POST", `${base}/hooks`, body));
-    }));
+    if (hookForm) {
+      field(hookForm, "kind").addEventListener("change", showHookInputs);
+      showHookInputs();
+      hookForm.addEventListener("submit", guarded(async (event) => {
+        event.preventDefault();
+        const v = formValues(hookForm);
+        const body = { name: v.name, kind: v.kind };
+        if (v.kind === "register") body.reg = v.reg;
+        if (v.kind === "breakpoint" || v.kind === "mem") body.addr = await resolveAddr(v.addr);
+        if (v.kind === "cpuid") body.leaf = v.leaf || "any";
+        if (v.kind === "descriptor") body.table = v.table;
+        if (v.kind === "mem") body.access = v.access;
+        renderHooks(await api("POST", `${base}/hooks`, body));
+      }));
+    }
 
-    guarded(() => Promise.all([loadKernel(), loadTasks(), loadRegisters(), loadHooks()]))();
+    guarded(() => Promise.all([loadKernel(), loadTasks(), loadRegisters(), ...(hookForm ? [loadHooks()] : [])]))();
   }
 
   return { initList, initGuest };

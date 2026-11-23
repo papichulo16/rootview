@@ -91,6 +91,18 @@ class VmDetails(BaseModel):
     profile_error: str | None = None
 
 
+class PhoneDetails(BaseModel):
+    serial: str
+    state: str
+    model: str
+    product: str
+    pkvmi: bool
+    connected: bool
+    attached: bool = False
+    profile_loaded: bool = False
+    profile_error: str | None = None
+
+
 class KernelInfo(BaseModel):
     banner: str
     release: str

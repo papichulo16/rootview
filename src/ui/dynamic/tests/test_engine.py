@@ -50,6 +50,19 @@ class Vm:
     log_path: str = ""
 
 
+@dataclass(frozen=True)
+class Phone:
+    serial: str
+    state: str = "device"
+    model: str = "Pixel 7"
+    product: str = "panther"
+    pkvmi: bool = True
+
+    @property
+    def connected(self):
+        return self.state == "device"
+
+
 @dataclass
 class FakeGuest:
     name: str
@@ -140,6 +153,8 @@ class FakePrim:
             "noprof": Vm("noprof", Config("noprof"), running=True, kvmi=True, pid=44),
             "off": Vm("off", Config("off")),
         }
+        self.phones = {"PIXEL1": Phone("PIXEL1"), "BARE": Phone("BARE", pkvmi=False),
+                       "LOCKED": Phone("LOCKED", state="unauthorized", model="", pkvmi=False)}
         self.guests = {}
         self.kernel_errors = {"noprof": "no BTF"}
 
@@ -171,6 +186,20 @@ class FakePrim:
 
     def destroy_vm(self, name, force=False):
         del self.vms[name]
+
+    def list_phones(self):
+        return list(self.phones.values())
+
+    def inspect_phone(self, serial):
+        if serial not in self.phones:
+            raise RootviewError(f"no phone {serial!r} on adb")
+        return self.phones[serial]
+
+    def Rootview(self, backend, target=None, profile=True):
+        assert backend == "pkvm-vmi" and self.phones[target].pkvmi
+        g = self.guests[target] = FakeGuest(target)
+        g.backend = backend
+        return g
 
     def Guest(self, name, profile=True):
         vm = self.inspect_vm(name)
@@ -386,3 +415,57 @@ def test_snapshot_carries_helpers_attach_and_loader(c):
 def test_scan_flags_a_getdents_rootkit(c):
     rules = {(d["rule"], d["prog_id"]) for d in c.post("/api/vms/web/scan").json()["detections"]}
     assert rules == {("probe_write_user", 111), ("getdents_hook", 111)}
+
+
+def test_phones_are_listed_like_guests(c):
+    phones = {p["serial"]: p for p in c.get("/api/phones").json()}
+    assert phones["PIXEL1"]["connected"] and phones["PIXEL1"]["pkvmi"]
+    assert not phones["LOCKED"]["connected"] and phones["LOCKED"]["state"] == "unauthorized"
+    assert c.get("/api/phones/NOPE/details").status_code == 502
+
+
+def test_phone_attaches_through_the_guest_routes(c, prim):
+    assert c.get("/api/vms/PIXEL1/kernel").json()["release"] == "6.8.0"
+    assert prim.guests["PIXEL1"].backend == "pkvm-vmi"
+    assert c.get("/api/phones/PIXEL1/details").json()["profile_loaded"] is True
+    assert c.get("/api/vms/BARE/kernel").status_code == 502
+    assert c.get("/api/vms/NOPE/kernel").status_code == 404
+
+
+def test_phone_registers_are_el1_el2(c, prim):
+    c.get("/api/vms/PIXEL1/kernel")
+    prim.guests["PIXEL1"].reg = lambda name: 0x1000
+    regs = c.get("/api/vms/PIXEL1/registers").json()
+    assert regs["ttbr1_el1"] == "0x1000" and "rip" not in regs
+
+
+def test_phone_pages(c):
+    page = c.get("/guests").text
+    assert "Phones" in page and 'href="/phones/PIXEL1"' in page and 'href="/phones/BARE"' not in page
+    assert "unauthorized" in page
+    phone = c.get("/phones/PIXEL1").text
+    assert "Pixel 7" in phone and "EL1 / EL2" in phone and "hook-form" not in phone
+    assert c.get("/phones/NOPE").status_code == 404
+
+
+def test_phones_are_dashboard_guests(c):
+    vms = {v["vm_id"]: v for v in c.get("/api/vms").json()}
+    assert vms["web"]["kind"] == "vm"
+    assert vms["PIXEL1"]["kind"] == "phone" and vms["PIXEL1"]["state"] == VMState.RUNNING
+    assert vms["BARE"]["state"] == VMState.UNREACHABLE and vms["LOCKED"]["state"] == VMState.UNREACHABLE
+    page = c.get("/dashboard").text
+    assert 'href="/phones/PIXEL1"' in page and "Pixel 7 (PIXEL1)" in page
+
+
+def test_scanning_a_phone_attaches_it(c, prim):
+    assert c.post("/api/vms/PIXEL1/scan").json()["programs_examined"] == 3
+    assert prim.guests["PIXEL1"].backend == "pkvm-vmi"
+    vm = c.get("/api/vms/PIXEL1").json()
+    assert vm["guest"]["profile_loaded"] is True and vm["guest"]["architecture"] == "arm64"
+
+
+def test_listing_never_attaches_a_phone(prim):
+    backend = LibVMIBackend(GuestPool(prim=prim))
+    backend.pool.ready = True
+    vm = backend._describe_phone(prim.phones["PIXEL1"])
+    assert vm.guest.profile_loaded is False and "PIXEL1" not in prim.guests

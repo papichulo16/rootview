@@ -76,23 +76,28 @@ static int resume_after_hook(rv_handle_t *h, int rc, char *err, size_t err_len) 
 }
 
 API int rv_hook_reg(rv_handle_t *h, const char *name, const char *reg, char *err, size_t err_len) {
+    if (rv_need_hooks(h, err, err_len) != 0) return -1;
     return hook_reg_add(&h->hooks, name, reg, push_event, h, err, err_len);
 }
 
 API int rv_hook_bp(rv_handle_t *h, const char *name, uint64_t va, char *err, size_t err_len) {
+    if (rv_need_hooks(h, err, err_len) != 0) return -1;
     if (pause_for_hook(h, err, err_len) != 0) return -1;
     return resume_after_hook(h, hook_bp_add(&h->hooks, name, va, push_event, h, err, err_len), err, err_len);
 }
 
 API int rv_hook_cpuid(rv_handle_t *h, const char *name, const char *leaf, char *err, size_t err_len) {
+    if (rv_need_hooks(h, err, err_len) != 0) return -1;
     return hook_cpuid_add(&h->hooks, name, leaf, push_event, h, err, err_len);
 }
 
 API int rv_hook_desc(rv_handle_t *h, const char *name, const char *table, char *err, size_t err_len) {
+    if (rv_need_hooks(h, err, err_len) != 0) return -1;
     return hook_desc_add(&h->hooks, name, table, push_event, h, err, err_len);
 }
 
 API int rv_hook_mem(rv_handle_t *h, const char *name, uint64_t va, const char *access, char *err, size_t err_len) {
+    if (rv_need_hooks(h, err, err_len) != 0) return -1;
     if (pause_for_hook(h, err, err_len) != 0) return -1;
     return resume_after_hook(h, hook_mem_add(&h->hooks, name, va, access, push_event, h, err, err_len), err,
                              err_len);
@@ -100,10 +105,12 @@ API int rv_hook_mem(rv_handle_t *h, const char *name, uint64_t va, const char *a
 
 API int rv_hook_mem_gfn(rv_handle_t *h, const char *name, uint64_t gfn, const char *access, int capture, char *err,
                         size_t err_len) {
+    if (rv_need_hooks(h, err, err_len) != 0) return -1;
     return hook_mem_add_gfn(&h->hooks, name, gfn, access, capture != 0, push_event, h, err, err_len);
 }
 
 API int rv_hook_remove(rv_handle_t *h, const char *name, char *err, size_t err_len) {
+    if (rv_need_hooks(h, err, err_len) != 0) return -1;
     return hook_remove(&h->hooks, name, err, err_len);
 }
 
@@ -139,6 +146,7 @@ API int rv_hooks(rv_handle_t *h, rv_hook_t *out, size_t max, size_t *n, char *er
 }
 
 API int rv_hook_poll(rv_handle_t *h, uint32_t timeout_ms, char *err, size_t err_len) {
+    if (rv_need_hooks(h, err, err_len) != 0) return -1;
     return hook_poll(&h->hooks, timeout_ms, err, err_len);
 }
 

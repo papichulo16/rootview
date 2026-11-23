@@ -6,9 +6,9 @@ pip install -e .    # the rootview package (no dependencies)
 ```
 
 ```python
-from rootview import Guest
+from rootview import Rootview
 
-with Guest("myvm") as g:
+with Rootview("kvm-vmi", "myvm") as g:      # or Rootview("pkvm-vmi") for the phone
     print(g.read_field("task_struct", "comm", g.sym("init_task")).value)  # swapper/0
 ```
 

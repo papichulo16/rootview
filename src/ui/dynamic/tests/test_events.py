@@ -199,3 +199,35 @@ def test_scanner_forget_allows_realerting():
 
     before, after = asyncio.run(scenario())
     assert after == before * 2
+
+
+
+def test_loop_does_not_wait_on_a_slow_guest():
+    from rootview_web.schemas import VM, VMState
+
+    class SlowBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self._vms["slow"] = VM(vm_id="slow", name="slow-phone", state=VMState.RUNNING, kind="phone")
+            self.release = asyncio.Event()
+
+        async def scan(self, vm_id):
+            if vm_id == "slow":
+                await self.release.wait()
+            return await super().scan(vm_id)
+
+    async def scenario():
+        backend = SlowBackend()
+        scanner = ScannerService(backend, EventBus(), interval=0.01)
+        await scanner.start()
+        for _ in range(200):
+            if scanner.latest("vm-1"):
+                break
+            await asyncio.sleep(0.01)
+        fast, slow = scanner.latest("vm-1"), scanner.latest("slow")
+        backend.release.set()
+        await scanner.stop()
+        return fast, slow
+
+    fast, slow = asyncio.run(scenario())
+    assert fast is not None and slow is None

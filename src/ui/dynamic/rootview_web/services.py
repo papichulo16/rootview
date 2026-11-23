@@ -13,7 +13,7 @@ import logging
 
 from rootview_web.backends.base import BackendError, IntrospectionBackend
 from rootview_web.events import Event, EventBus
-from rootview_web.schemas import Detection, ScanResult, VMState
+from rootview_web.schemas import Detection, ScanResult, VM, VMState
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +37,9 @@ class ScannerService:
         self._reported: set[str] = set()
         self._latest: dict[str, ScanResult] = {}
         self._task: asyncio.Task[None] | None = None
+        # the loop's per-guest scans still in flight, so a slow guest is skipped
+        # rather than queued up again
+        self._busy: dict[str, asyncio.Task[None]] = {}
 
     @property
     def running(self) -> bool:
@@ -70,9 +73,7 @@ class ScannerService:
         self._reported.clear()
         self._latest.clear()
 
-    async def scan_once(self) -> list[ScanResult]:
-        """Run one pass over every running guest, publishing what is new."""
-        results = []
+    async def _running_guests(self) -> list[VM]:
         try:
             vms = await self.backend.list_vms()
         except (BackendError, NotImplementedError) as exc:
@@ -80,36 +81,55 @@ class ScannerService:
             # written: the server stays up and says so instead of crash-looping.
             log.warning("could not list guests: %s", exc)
             self.bus.publish(Event.status(f"Backend error listing guests: {exc}", level="error"))
-            return results
+            return []
+        return [vm for vm in vms if vm.state is VMState.RUNNING]
 
-        for vm in vms:
-            if vm.state is not VMState.RUNNING:
-                continue
-            try:
-                result = await self.backend.scan(vm.vm_id)
-            except (BackendError, NotImplementedError) as exc:
-                # One unreadable guest must not stop the others from being
-                # scanned, so this is logged and reported rather than raised.
-                log.warning("scan of %s failed: %s", vm.vm_id, exc)
-                self.bus.publish(
-                    Event.status(f"Scan of {vm.name} failed: {exc}", level="error", vm_id=vm.vm_id)
-                )
-                continue
+    async def _scan_guest(self, vm: VM) -> ScanResult | None:
+        try:
+            result = await self.backend.scan(vm.vm_id)
+        except (BackendError, NotImplementedError) as exc:
+            # One unreadable guest must not stop the others from being
+            # scanned, so this is logged and reported rather than raised.
+            log.warning("scan of %s failed: %s", vm.vm_id, exc)
+            self.bus.publish(Event.status(f"Scan of {vm.name} failed: {exc}", level="error", vm_id=vm.vm_id))
+            return None
 
-            self._latest[vm.vm_id] = result
-            results.append(result)
-            for detection in result.detections:
-                if detection.detection_id in self._reported:
-                    continue
-                self._reported.add(detection.detection_id)
-                self.bus.publish(Event.detection(detection))
-            self.bus.publish(Event.scan(result))
+        self._latest[vm.vm_id] = result
+        for detection in result.detections:
+            if detection.detection_id in self._reported:
+                continue
+            self._reported.add(detection.detection_id)
+            self.bus.publish(Event.detection(detection))
+        self.bus.publish(Event.scan(result))
+        return result
+
+    async def scan_once(self) -> list[ScanResult]:
+        """Run one pass over every running guest, publishing what is new."""
+        results = []
+        for vm in await self._running_guests():
+            result = await self._scan_guest(vm)
+            if result is not None:
+                results.append(result)
         return results
 
+    async def _scan_logged(self, vm: VM) -> None:
+        try:
+            await self._scan_guest(vm)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("unexpected error scanning %s", vm.vm_id)
+
     async def _loop(self) -> None:
+        # Every guest scans on its own task, so a slow one (a phone over adb
+        # takes minutes) never holds up the rest. One still being scanned is
+        # skipped until it finishes.
         while True:
             try:
-                await self.scan_once()
+                for vm in await self._running_guests():
+                    busy = self._busy.get(vm.vm_id)
+                    if busy is None or busy.done():
+                        self._busy[vm.vm_id] = asyncio.create_task(self._scan_logged(vm), name=f"scan-{vm.vm_id}")
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -132,6 +152,10 @@ class ScannerService:
         self._task = asyncio.create_task(self._loop(), name="rootview-scanner")
 
     async def stop(self) -> None:
+        for busy in self._busy.values():
+            busy.cancel()
+        await asyncio.gather(*self._busy.values(), return_exceptions=True)
+        self._busy.clear()
         if self._task is not None:
             self._task.cancel()
             try:

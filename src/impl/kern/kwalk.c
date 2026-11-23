@@ -22,7 +22,8 @@
 void kwalk_init(kwalk_t *w, const kprof_t *kp, size_t max_pages) {
     if (max_pages == 0) max_pages = KWALK_DEFAULT_CACHE_PAGES;
     if (max_pages > KWALK_MAX_CACHE_PAGES) max_pages = KWALK_MAX_CACHE_PAGES;
-    *w = (kwalk_t) {.kp = kp, .budget_ms = KWALK_DEFAULT_BUDGET_MS, .max_pages = max_pages};
+    uint32_t budget_ms = vmi_walk_budget_ms(kp->session);
+    *w = (kwalk_t) {.kp = kp, .budget_ms = budget_ms ? budget_ms : KWALK_DEFAULT_BUDGET_MS, .max_pages = max_pages};
 }
 
 static void cache_drop(kwalk_t *w) {

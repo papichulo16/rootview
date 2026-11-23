@@ -54,6 +54,9 @@
           <dd>
             {% if vm.guest.profile_loaded %}
               loaded
+            {% elif vm.kind == 'phone' and vm.state.value == 'running' %}
+              {# a phone is only profiled by its first scan, a few minutes over adb #}
+              <span class="muted">on first scan</span>
             {% else %}
               {# Without a matching kernel profile the backend cannot resolve
                  symbols, so findings for this guest would be unreliable. #}
@@ -67,7 +70,7 @@
           <span data-role="progs">-</span> programs /
           <span data-role="maps">-</span> maps
         </span>
-        <span><a href="/guests/{{ vm.vm_id }}">Guest</a> · <a href="/introspect?vm={{ vm.vm_id }}">eBPF &rarr;</a></span>
+        <span><a href="/{{ 'phones' if vm.kind == 'phone' else 'guests' }}/{{ vm.vm_id }}">{{ 'Phone' if vm.kind == 'phone' else 'Guest' }}</a> · <a href="/introspect?vm={{ vm.vm_id }}">eBPF &rarr;</a></span>
       </footer>
     </article>
     {% else %}

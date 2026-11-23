@@ -10,6 +10,11 @@ ERR_MAX = 512
 
 # reentrant: Guest.__del__ can run from a GC pass inside a locked call
 lock = threading.RLock()
+# pkvm-vmi handles take their own lock: one phone call can run for a minute
+# over adb, and holding the global lock that long stalls a paused kvm-vmi guest
+# until KVMI drops it. the two backends share no state in librootview.
+pkvm_lock = threading.RLock()
+_handle_locks: dict[int, threading.RLock] = {}
 _lib: ctypes.CDLL | None = None
 _sigs: dict[str, tuple[object, tuple]] = {}
 
@@ -48,10 +53,20 @@ def lib(path: str | os.PathLike | None = None) -> ctypes.CDLL:
         return _lib
 
 
+def handle_lock(handle: int, lk: threading.RLock) -> None:
+    """Calls on handle take lk instead of the global lock."""
+    _handle_locks[handle] = lk
+
+
+def handle_unlock(handle: int) -> None:
+    _handle_locks.pop(handle, None)
+
+
 def call(name: str, *args) -> None:
     fn = getattr(lib(), name)
     err = ctypes.create_string_buffer(ERR_MAX)
-    with lock:
+    handle = args[0] if args and isinstance(args[0], int) else None
+    with _handle_locks.get(handle, lock):
         rc = fn(*args, err, ERR_MAX)
     if rc != 0:
         raise RootviewError(text(err.value) or f"{name} failed")

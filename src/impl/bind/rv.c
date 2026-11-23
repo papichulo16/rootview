@@ -15,6 +15,12 @@ int rv_need_prof(const rv_handle_t *h, char *err, size_t err_len) {
     return -1;
 }
 
+int rv_need_hooks(const rv_handle_t *h, char *err, size_t err_len) {
+    if (vmi_has_hooks(&h->session)) return 0;
+    if (err) snprintf(err, err_len, "hooks aren't supported by %s", vmi_backend_name(&h->session));
+    return -1;
+}
+
 void rv_prof_free(rv_handle_t *h) {
     if (!h->prof) return;
     if (h->w.in_window) kwalk_end(&h->w, NULL, 0);
@@ -27,13 +33,13 @@ API void rv_set_base(const char *dir) {
     vm_store_set_base(dir);
 }
 
-API rv_handle_t *rv_attach(const char *vm_name, char *err, size_t err_len) {
+API rv_handle_t *rv_attach(const char *backend, const char *target, char *err, size_t err_len) {
     rv_handle_t *h = calloc(1, sizeof(*h));
     if (!h) {
         rv_set_err(err, err_len, "out of memory");
         return NULL;
     }
-    if (vmi_attach(vm_name, &h->session, err, err_len) != 0) {
+    if (vmi_attach(backend, target, &h->session, err, err_len) != 0) {
         free(h);
         return NULL;
     }

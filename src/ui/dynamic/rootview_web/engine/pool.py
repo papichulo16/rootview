@@ -1,4 +1,7 @@
-"""Attached guests, shared by the backend and the tool routes."""
+"""Attached guests, shared by the backend and the tool routes.
+
+A guest is a kvmi vm (by name) or a phone (by adb serial); both attach as a
+rootview.Rootview, so every tool route works on either."""
 
 from __future__ import annotations
 
@@ -80,12 +83,27 @@ class GuestPool:
                     self._drop_locked(vm_id)
                 raise BackendError(f"{vm_id}: {e}") from e
 
+    def phone(self, serial: str) -> Any | None:
+        """The phone with that adb serial, or None (also when adb isn't there)."""
+        try:
+            return self.prim.inspect_phone(serial)
+        except self.prim.RootviewError:
+            return None
+
+    def _open(self, vm_id: str) -> Any:
+        if vm_id in {v.name for v in self._call(self.prim.list_vms)}:
+            return self._call(self.prim.Guest, vm_id, False)
+        phone = self.phone(vm_id)
+        if phone is None:
+            raise UnknownVMError(f"no guest or phone named {vm_id!r}")
+        if not phone.pkvmi:
+            raise BackendError(f"{vm_id}: no pkvmi on the phone ({phone.state})")
+        return self._call(self.prim.Rootview, "pkvm-vmi", vm_id, False)
+
     def _attach(self, vm_id: str) -> Any:
         g = self._guests.get(vm_id)
         if g is None:
-            if vm_id not in {v.name for v in self._call(self.prim.list_vms)}:
-                raise UnknownVMError(f"no guest named {vm_id!r}")
-            g = self._guests[vm_id] = self._call(self.prim.Guest, vm_id, False)
+            g = self._guests[vm_id] = self._open(vm_id)
         if not g.profiled and time.monotonic() >= self._profile_due.get(vm_id, 0.0):
             self._profile(vm_id, g)
         return g
@@ -102,7 +120,8 @@ class GuestPool:
         try:
             return self.prim.inspect_vm(vm_id).running
         except self.prim.RootviewError:
-            return False
+            phone = self.phone(vm_id)
+            return phone is not None and phone.connected
 
     def _drop(self, vm_id: str) -> None:
         with self._lock(vm_id):
